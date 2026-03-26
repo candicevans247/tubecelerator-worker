@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ['nodejs_20', 'ffmpeg_6-full', 'fontconfig', 'dejavu_fonts', 'liberation_ttf']
+
+[phases.install]
+cmds = ['npm install --production', 'fc-cache -fv']
+
+[start]
+cmd = 'node worker.js'
