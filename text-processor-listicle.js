@@ -1,10 +1,9 @@
-// text-processor-listicle.js - DEDICATED CAST/LISTICLE PROCESSOR
+// text-processor-listicle.js - Celebrity Gossip Listicle Segmentation (Image/Video/Mixed aware)
 require("dotenv").config();
 
 const { openai, genAI } = require('./ai-clients');
-// -------------------
-// ✅ NEW: Gemini 3 helper (PRIMARY)
-// -------------------
+
+// ✅ Gemini helper
 async function generateWithGemini(systemPrompt, userPrompt) {
   try {
     const response = await genAI.models.generateContent({
@@ -22,12 +21,9 @@ async function generateWithGemini(systemPrompt, userPrompt) {
   }
 }
 
-// -------------------
-// ✅ NEW: OpenAI helper (FALLBACK ONLY)
-// -------------------
+// ✅ OpenAI helper
 async function generateWithOpenAI(systemPrompt, userPrompt) {
   console.warn('⚠️ Using OpenAI as fallback...');
-  
   const response = await openai.chat.completions.create({
     model: 'gpt-4',
     messages: [
@@ -39,368 +35,369 @@ async function generateWithOpenAI(systemPrompt, userPrompt) {
   return response.choices[0].message.content.trim();
 }
 
-// -------------------
-// ✅ NEW: Unified AI generator - ALWAYS Gemini first
-// -------------------
+// ✅ Unified AI — Gemini first, OpenAI fallback
 async function generateWithAI(systemPrompt, userPrompt) {
   try {
-    console.log('🤖 Using Gemini 3 Flash (PRIMARY) for listicle segmentation...');
+    console.log('🤖 Using Gemini 3 Flash for listicle segmentation...');
     return await generateWithGemini(systemPrompt, userPrompt);
   } catch (geminiError) {
     console.error('❌ Gemini failed:', geminiError.message);
     console.log('🔄 Falling back to OpenAI...');
-    
     try {
       const result = await generateWithOpenAI(systemPrompt, userPrompt);
       console.log('✅ OpenAI fallback successful');
       return result;
     } catch (openaiError) {
-      console.error('❌ OpenAI fallback also failed:', openaiError.message);
-      throw new Error(`Both AI providers failed. Gemini: ${geminiError.message} | OpenAI: ${openaiError.message}`);
+      throw new Error(
+        `Both AI providers failed. Gemini: ${geminiError.message} | OpenAI: ${openaiError.message}`
+      );
     }
   }
 }
 
-// -------------------
-// Listicle Content Detection 
-// -------------------
-function detectListicleStructure(scriptText) {
-  const celebNames = [];
-  const celebMatch = scriptText.match(
+// ✅ Extract celebrity names
+function extractCelebrityNames(scriptText) {
+  const matches = scriptText.match(
     /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g
   );
-  if (celebMatch) celebNames.push(...new Set(celebMatch));
+  const names = matches ? [...new Set(matches)] : [];
+  console.log(
+    `🌟 Detected ${names.length} celebrity name(s): ${names.slice(0, 5).join(', ')}` +
+    `${names.length > 5 ? '...' : ''}`
+  );
+  return names;
+}
 
-  // Detect list patterns
+// ✅ Detect listicle structure
+function detectListicleStructure(scriptText) {
+  const celebNames = extractCelebrityNames(scriptText);
+
   const listIndicators = [
-    /\b(cast|stars?|actors?|celebrities)\b/gi,
     /\b(top\s+\d+|best\s+\d+|worst\s+\d+|\d+\s+best|\d+\s+worst)\b/gi,
-    /\b(let's\s+meet|introducing|here\s+are|these\s+are)\b/gi,
-    /\b(first|second|third|fourth|fifth|next\s+up|moving\s+on)\b/gi,
-    /\bas\s+[A-Z][a-z]+\b/g, // "as Character" pattern
-    /\b(who\s+plays?|portrays?|stars?\s+as)\b/gi,
     /\b(number\s+\d+|\d+\.|#\d+)\b/gi,
+    /\b(first|second|third|fourth|fifth)\b/gi,
+    /\b(next\s+up|moving\s+on|up\s+next|coming\s+in\s+at)\b/gi,
+    /\b(let's\s+meet|introducing|here\s+are|these\s+are)\b/gi,
+    /\b(cast|stars?|actors?|celebrities)\b/gi,
+    /\bas\s+[A-Z][a-z]+\b/g,
+    /\b(who\s+plays?|portrays?|stars?\s+as)\b/gi,
   ];
 
-  const transitionPhrases = [
-    /\b(next\s+up|moving\s+on\s+to|now\s+let's\s+talk\s+about|up\s+next)\b/gi,
-    /\b(another|also|additionally|furthermore)\b/gi,
-    /\b(born\s+on|age\s+\d+|years?\s+old)\b/gi,
-  ];
+  const listScore = listIndicators.reduce(
+    (score, pattern) => score + (scriptText.match(pattern) || []).length,
+    0
+  );
 
-  const listScore = listIndicators.reduce((score, pattern) => 
-    score + (scriptText.match(pattern) || []).length, 0);
-  
-  const transitionScore = transitionPhrases.reduce((score, pattern) => 
-    score + (scriptText.match(pattern) || []).length, 0);
+  const isCastBreakdown = celebNames.length > 2 && listScore >= 2;
+  const isRankedList = listScore >= 3;
 
-  // Determine if this is listicle content
-  const isListicle = listScore >= 2 || transitionScore >= 3;
-  const isCastBreakdown = celebNames.length > 2 && isListicle;
-
-  return {
-    celebNames,
-    isListicle,
-    isCastBreakdown,
-    listScore,
-    transitionScore
-  };
+  return { celebNames, isCastBreakdown, isRankedList, listScore };
 }
 
-// -------------------
-// ✅ UPDATED: processListicleContent with new segmentation rules
-// -------------------
-async function processListicleContent(scriptText, listInfo) {
-  try {
-    let contentType = 'general listicle';
-    let segmentationStrategy = '';
-    let imageStrategy = '';
+// ✅ Fisher-Yates shuffle for mixed mode
+function assignMixedMediaTypes(totalSegments) {
+  const videoCount = Math.round(totalSegments * 0.6);
+  const imageCount = totalSegments - videoCount;
 
-    if (listInfo.isCastBreakdown) {
-      contentType = 'cast breakdown';
-      segmentationStrategy = `This is a CAST BREAKDOWN script featuring ${listInfo.celebNames.length} celebrities.
+  const assignments = [
+    ...Array(videoCount).fill('video'),
+    ...Array(imageCount).fill('image')
+  ];
 
-SEGMENTATION RULES:
-- NEVER modify, rewrite, or add words to the original script
-- ONLY split the existing text into segments at natural break points
-- Start NEW segments when the script introduces each actor/celebrity 
-- Each person should get 2-4 segments based on the existing text structure
-- Group related sentences about the same person together
-- Look for natural breaks where the script switches to a new actor/celebrity
-- Split at existing transition phrases like "Next up", "Moving on to", etc.
-- Keep all original wording exactly as written
-
-🎬 PACING & SUSPENSE RULES:
-- Break at emotional beats or revelations about each celebrity
-- Create suspense by splitting before major reveals
-- Each segment should feel complete but leave anticipation for the next
-- Prefer shorter, punchier segments for maximum engagement
-- Think cinematically - each segment is a scene transition`;
-
-      imageStrategy = `CAST BREAKDOWN IMAGE STRATEGY:
-- Each actor needs multiple diverse images (headshots, character photos, red carpet, behind-scenes)
-- ALWAYS include the specific actor's name in queries for accuracy
-- Focus on: professional headshots, character stills, event photos, candid shots
-- Avoid generic "actor photo" - use "ActorName headshot" instead
-- Mix individual photos with cast group photos when appropriate`;
-
-    } else if (listInfo.isListicle) {
-      contentType = 'structured listicle';
-      segmentationStrategy = `This is a LISTICLE/RANKED LIST script.
-
-SEGMENTATION RULES:
-- Start NEW segments for each list item or main point
-- Each item should get dedicated segment(s) explaining it
-- Group related information about the same item together  
-- Use clear transitions between different list items
-- Keep explanations about the same item together
-- Break when moving to the next list item
-
-🎬 PACING & SUSPENSE RULES:
-- Build suspense before revealing each list item
-- Break at moments of revelation or surprise
-- Create anticipation for the next item in the ranking
-- Each segment should engage viewer curiosity
-- Prefer shorter segments that build momentum`;
-
-      imageStrategy = `LISTICLE IMAGE STRATEGY:
-- Each list item needs specific, relevant imagery
-- Use descriptive, searchable queries for each topic
-- Focus on: item-specific photos, relevant context images, illustrative content
-- Make queries specific to avoid generic stock photos
-- Consider what viewers need to see for each point`;
-    }
-
-    const systemPrompt = `You are an expert at splitting scripts into segments for video content.
-
-CRITICAL RULE: NEVER modify, rewrite, or change ANY words from the original script. Your job is ONLY to split the existing text at appropriate points.
-
-CONTENT TYPE: ${contentType.toUpperCase()}
-DETECTED CELEBRITIES: ${listInfo.celebNames.length > 0 ? listInfo.celebNames.slice(0, 5).join(', ') : 'None'}
-
-${segmentationStrategy}
-
-${imageStrategy}
-
-Your task:
-1. Split the original script text into segments at natural break points - DO NOT change any words
-2. Each segment should be 1-2 sentences from the original script
-3. Find where the script naturally transitions between people/topics
-4. Generate appropriate image queries for each segment
-5. Keep all original text exactly as written
-
-SPLITTING GUIDELINES:
-- Look for existing phrases like "Next up", "Moving on", actor introductions
-- Split when the script starts talking about a new person
-- Group sentences about the same person/topic together
-- Use the script's existing structure and transitions
-- DO NOT add, remove, or modify any words from the original text
-- Break at emotional beats, revelations, or shifts in tone for maximum suspense
-
-CRITICAL RULES:
-- For celebrity content: ALWAYS include the celebrity's name in queries ("Gabriel Guevara headshot" not "actor headshot")
-- Start new segments for each person/item in the list
-- Group related info about the same person/item together
-- Create diverse image queries to avoid repetition
-- Make queries specific and searchable
-
-Return ONLY a JSON array (no markdown, no code blocks):
-[
-  {
-    "segment": "First segment about item/person 1.",
-    "query": "Specific image query with names/details"
-  },
-  {
-    "segment": "More details about item/person 1.",
-    "query": "Different specific image query for visual variety"
-  },
-  {
-    "segment": "Introduction to item/person 2.",
-    "query": "New specific image query for item/person 2"
+  for (let i = assignments.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [assignments[i], assignments[j]] = [assignments[j], assignments[i]];
   }
-]
 
-Remember: This is ${contentType} content, so structure it accordingly with clear breaks between items/people.`;
+  console.log(
+    `🎲 Mixed listicle: ${videoCount} videos + ${imageCount} images across ${totalSegments} segments`
+  );
+  return assignments;
+}
 
-    const userPrompt = `Create structured ${contentType} segments with image queries for this script:
+// ✅ Build fallback query
+function buildFallbackQuery(celebNames, index, type) {
+  if (celebNames.length === 0) {
+    return type === 'video'
+      ? 'celebrity paparazzi walking footage'
+      : 'celebrity gossip paparazzi photo';
+  }
+  const name = celebNames[index % celebNames.length];
+  return type === 'video'
+    ? `${name} paparazzi footage`
+    : `${name} photos`;
+}
 
-${scriptText}
+// ✅ Build query instructions based on media type
+function buildQueryInstructions(mediaType, celebNames) {
+  const nameHint = celebNames.length > 0
+    ? `CELEBRITIES: ${celebNames.join(', ')}\nAlways include the specific celebrity name in queries.`
+    : `No specific names detected. Use descriptive gossip-relevant queries.`;
 
-Apply the segmentation rules:
-- Each person/item gets dedicated segments
-- Include celebrity names in image queries
-- Ensure visual variety and accurate image matching
-- Group related information together per person/item
-- Focus on suspense and pacing`;
+  const imageRules = `📸 IMAGE QUERY RULES:
+- Search Google Images style queries
+- Include celebrity full name + specific context
+- Prioritize: red carpet, paparazzi, events, magazine covers, social media moments
+- Example: "Zendaya Euphoria premiere red carpet 2022"`;
 
-    // ✅ UPDATED: Use new AI generator (Gemini primary, OpenAI fallback)
-    const rawResult = await generateWithAI(systemPrompt, userPrompt);
-    
-    // Parse JSON response
-    let segmentsWithQueries;
-    try {
-      // Clean the response if it has markdown formatting
-      const cleanedResult = rawResult.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      segmentsWithQueries = JSON.parse(cleanedResult);
-    } catch (parseError) {
-      console.error('❌ Failed to parse JSON response:', parseError.message);
-      console.error('Raw response:', rawResult.slice(0, 500));
-      throw new Error('Invalid JSON response from AI');
-    }
+  const videoRules = `🎬 VIDEO QUERY RULES:
+- Search Pexels video style queries
+- Include celebrity full name + motion/action context
+- Use words like: "footage", "walking", "interview", "performance", "arriving"
+- Example: "Zendaya interview footage 2022"`;
 
-    // Validate response structure
-    if (!Array.isArray(segmentsWithQueries) || segmentsWithQueries.length === 0) {
-      throw new Error('AI returned invalid segment structure');
-    }
+  if (mediaType === 'images') return `${nameHint}\n\n${imageRules}\n\nReturn "imageQuery" per segment.`;
+  if (mediaType === 'videos') return `${nameHint}\n\n${videoRules}\n\nReturn "videoQuery" per segment.`;
+  return `${nameHint}\n\n${imageRules}\n\n${videoRules}\n\nFor MIXED mode:\n- mediaType "image" → return "imageQuery"\n- mediaType "video" → return "videoQuery"`;
+}
 
-    // Convert to standard format
-    const segments = segmentsWithQueries.map((item, index) => {
-      if (!item.segment || !item.query) {
-        console.warn(`⚠️ Segment ${index + 1} missing text or query, using fallback`);
-        return {
-          text: item.segment || `Segment ${index + 1}`,
-          duration: 0,
-          mediaQuery: item.query || (listInfo.celebNames.length > 0 
-            ? `${listInfo.celebNames[0]} photos`
-            : 'relevant content photo')
-        };
-      }
-      
+// ✅ Build JSON format
+function buildJsonFormat(mediaType) {
+  if (mediaType === 'images') {
+    return `[{ "segment": "Exact script text.", "imageQuery": "Celebrity Name context" }]`;
+  }
+  if (mediaType === 'videos') {
+    return `[{ "segment": "Exact script text.", "videoQuery": "Celebrity Name footage context" }]`;
+  }
+  return `[
+  { "segment": "Exact script text.", "mediaType": "image", "imageQuery": "Celebrity Name context" },
+  { "segment": "Next beat.", "mediaType": "video", "videoQuery": "Celebrity Name footage context" }
+]`;
+}
+
+// ✅ Build content type block
+function buildContentTypeBlock(listInfo) {
+  const { celebNames, isCastBreakdown, isRankedList } = listInfo;
+
+  if (isCastBreakdown) {
+    return `CONTENT TYPE: CAST BREAKDOWN
+This script introduces multiple celebrities one by one.
+
+SEGMENTATION RULES:
+- Start a new segment each time the script introduces a new celebrity
+- Group 1-3 sentences about the same person together before breaking
+- Break when the script clearly shifts to a different person
+- Look for transition phrases like "Next up", "Moving on to", "Coming in at"
+- Each celebrity should get at least 2 segments for visual variety
+- DO NOT rewrite or rephrase any words — only split at natural break points`;
+  }
+
+  if (isRankedList) {
+    return `CONTENT TYPE: RANKED GOSSIP LIST
+This script counts down or ranks celebrity moments, scandals, or events.
+
+SEGMENTATION RULES:
+- Each list item (number/rank) should start a new segment group
+- Split the setup and the reveal into separate segments for suspense
+- Break just before the major revelation of each item
+- Transition phrases like "But number 3..." = new segment
+- DO NOT rewrite or rephrase any words — only split at natural break points`;
+  }
+
+  return `CONTENT TYPE: CELEBRITY GOSSIP LISTICLE
+This script covers multiple celebrity topics or moments in sequence.
+
+SEGMENTATION RULES:
+- Break when the script shifts from one topic or celebrity to another
+- Group related sentences about the same topic together
+- Create suspense by splitting before revelations
+- DO NOT rewrite or rephrase any words — only split at natural break points`;
+}
+
+// ✅ Main listicle segmentation
+async function processListicleContent(scriptText, listInfo, mediaType, mixedAssignments) {
+  const contentTypeBlock = buildContentTypeBlock(listInfo);
+  const queryInstructions = buildQueryInstructions(mediaType, listInfo.celebNames);
+  const jsonFormat = buildJsonFormat(mediaType);
+
+  const mixedContext = mediaType === 'mixed' && mixedAssignments
+    ? `\nSEGMENT MEDIA ASSIGNMENTS (follow exactly):\n` +
+      mixedAssignments.map((type, i) => `Segment ${i + 1}: ${type}`).join('\n')
+    : '';
+
+  const systemPrompt = `You are an expert celebrity gossip video producer splitting narration scripts into visual segments.
+
+This is ALWAYS celebrity gossip content.
+
+${contentTypeBlock}
+
+${queryInstructions}
+
+CRITICAL RULE: Do NOT modify, rewrite, or add any words to the original script. Only split and generate queries.
+${mixedContext}
+
+Return ONLY a JSON array in this exact format (no markdown, no code blocks):
+${jsonFormat}`;
+
+  const userPrompt = `Split this celebrity gossip listicle script into segments with ${mediaType === 'mixed' ? 'image and video' : mediaType} queries.
+
+Rules:
+- Each person or list item gets dedicated segment(s)
+- Include celebrity names in every query
+- Ensure visual variety across all queries
+- Do NOT change any words from the script
+${mediaType === 'mixed' ? '- Follow the segment media assignments exactly' : ''}
+
+SCRIPT:
+${scriptText}`;
+
+  const rawResult = await generateWithAI(systemPrompt, userPrompt);
+
+  let segmentsWithQueries;
+  try {
+    const cleaned = rawResult
+      .replace(/```json\n?/g, '')
+      .replace(/```\n?/g, '')
+      .trim();
+    segmentsWithQueries = JSON.parse(cleaned);
+  } catch (parseError) {
+    console.error('❌ Failed to parse JSON response:', parseError.message);
+    throw new Error('Invalid JSON response from AI');
+  }
+
+  if (!Array.isArray(segmentsWithQueries) || segmentsWithQueries.length === 0) {
+    throw new Error('AI returned invalid segment structure');
+  }
+
+  return segmentsWithQueries.map((item, index) => {
+    const base = {
+      text: item.segment || `Segment ${index + 1}`,
+      duration: 0,
+    };
+
+    if (mediaType === 'images') {
       return {
-        text: item.segment,
-        duration: 0, // Will be set by audio-robot
-        mediaQuery: item.query
+        ...base,
+        imageQuery: item.imageQuery || buildFallbackQuery(listInfo.celebNames, index, 'image')
       };
-    });
+    }
 
-    console.log(`✅ Gemini generated ${segments.length} ${contentType} segments with strategic pacing`);
-    console.log(`📊 Content analysis: ${listInfo.isCastBreakdown ? 'Cast breakdown' : 'General listicle'} (${listInfo.celebNames.length} celebrities)`);
-    
-    return segments;
+    if (mediaType === 'videos') {
+      return {
+        ...base,
+        videoQuery: item.videoQuery || buildFallbackQuery(listInfo.celebNames, index, 'video')
+      };
+    }
 
-  } catch (error) {
-    console.error('❌ Failed to generate listicle segments:', error.message);
-    throw error;
-  }
+    // mixed
+    const assignedType = item.mediaType || mixedAssignments?.[index] || 'image';
+    return {
+      ...base,
+      mediaType: assignedType,
+      imageQuery: assignedType === 'image'
+        ? (item.imageQuery || buildFallbackQuery(listInfo.celebNames, index, 'image'))
+        : null,
+      videoQuery: assignedType === 'video'
+        ? (item.videoQuery || buildFallbackQuery(listInfo.celebNames, index, 'video'))
+        : null,
+    };
+  });
 }
 
-// -------------------
-// FALLBACK: Basic listicle segmentation (unchanged)
-// -------------------
-async function generateListicleFallback(scriptText, listInfo) {
+// ✅ Fallback segmentation
+function generateListicleFallback(scriptText, listInfo, mediaType, mixedAssignments) {
   console.warn('⚠️ Using listicle fallback segmentation...');
-  
-  try {
-    // Look for common transition words and celebrity names to break segments
-    const sentences = scriptText.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const segments = [];
-    
-    let currentSegment = '';
-    let wordCount = 0;
-    
-    for (let i = 0; i < sentences.length; i++) {
-      const sentence = sentences[i].trim();
-      const sentenceWords = sentence.split(/\s+/).length;
-      
-      // Check if this sentence starts a new person/item
-      const isNewItem = /\b(next\s+up|moving\s+on|now\s+let's|born\s+on|\bas\s+[A-Z])/i.test(sentence) ||
-                       listInfo.celebNames.some(name => sentence.includes(name.split(' ')[0]));
-      
-      if ((wordCount + sentenceWords > 30 || isNewItem) && currentSegment) {
-        segments.push({ 
-          text: currentSegment.trim(), 
-          duration: 0,
-          mediaQuery: listInfo.celebNames.length > 0 
-            ? `${listInfo.celebNames[0]} photos`
-            : 'relevant content photo'
-        });
-        currentSegment = sentence;
-        wordCount = sentenceWords;
-      } else {
-        currentSegment += (currentSegment ? '. ' : '') + sentence;
-        wordCount += sentenceWords;
-      }
-    }
-    
-    if (currentSegment) {
-      segments.push({ 
-        text: currentSegment.trim(), 
-        duration: 0,
-        mediaQuery: listInfo.celebNames.length > 0 
-          ? `${listInfo.celebNames[0]} photos`
-          : 'relevant content photo'
-      });
-    }
 
-    console.log(`✅ Fallback generated ${segments.length} segments`);
-    return segments;
+  const { celebNames } = listInfo;
+  const sentences = scriptText.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  const segments = [];
+  let current = '';
+  let wordCount = 0;
 
-  } catch (fallbackError) {
-    console.error('❌ Listicle fallback failed:', fallbackError.message);
-    
-    // Last resort: split by sentences with basic queries
-    const basicSegments = scriptText.split(/[.!?]+/)
-      .filter(s => s.trim().length > 0)
-      .slice(0, 15) // Limit to reasonable number
-      .map((text, index) => ({
-        text: text.trim(),
-        duration: 0,
-        mediaQuery: listInfo.celebNames.length > 0 
-          ? `${listInfo.celebNames[Math.min(index, listInfo.celebNames.length - 1)]} photos`
-          : 'relevant listicle content'
-      }));
-    
-    return basicSegments;
+  for (const sentence of sentences) {
+    const words = sentence.trim().split(/\s+/).length;
+    const isNewItem =
+      /\b(next\s+up|moving\s+on|number\s+\d+|#\d+)\b/i.test(sentence) ||
+      celebNames.some(name => sentence.includes(name.split(' ')[0]));
+
+    if ((wordCount + words > 30 || isNewItem) && current) {
+      segments.push({ text: current.trim(), duration: 0 });
+      current = sentence.trim();
+      wordCount = words;
+    } else {
+      current += (current ? '. ' : '') + sentence.trim();
+      wordCount += words;
+    }
   }
+
+  if (current) segments.push({ text: current.trim(), duration: 0 });
+
+  return segments.map((seg, index) => {
+    if (mediaType === 'images') {
+      return { ...seg, imageQuery: buildFallbackQuery(celebNames, index, 'image') };
+    }
+    if (mediaType === 'videos') {
+      return { ...seg, videoQuery: buildFallbackQuery(celebNames, index, 'video') };
+    }
+    const assignedType = mixedAssignments?.[index] || 'image';
+    return {
+      ...seg,
+      mediaType: assignedType,
+      imageQuery: assignedType === 'image' ? buildFallbackQuery(celebNames, index, 'image') : null,
+      videoQuery: assignedType === 'video' ? buildFallbackQuery(celebNames, index, 'video') : null,
+    };
+  });
 }
 
-// -------------------
-// Main entry point (unchanged)
-// -------------------
-async function generateListicleSegments(scriptText) {
-  console.log('🎬 Starting listicle/cast breakdown segment generation (GEMINI PRIMARY)...');
-  
-  // Step 1: Analyze listicle structure
+// ✅ Main entry point
+async function generateListicleSegments(scriptText, mediaType = 'images') {
+  console.log(`🎬 Starting celebrity gossip listicle segmentation (media: ${mediaType})...`);
+
   const listInfo = detectListicleStructure(scriptText);
-  console.log(`📊 Listicle analysis:`, {
-    isListicle: listInfo.isListicle,
+
+  console.log('📊 Listicle analysis:', {
     isCastBreakdown: listInfo.isCastBreakdown,
-    celebrities: listInfo.celebNames.length,
+    isRankedList: listInfo.isRankedList,
     listScore: listInfo.listScore,
-    names: listInfo.celebNames.slice(0, 3)
+    celebrities: listInfo.celebNames.length,
+    names: listInfo.celebNames.slice(0, 3),
+    mediaType
   });
 
+  // Pre-assign mixed media types
+  let mixedAssignments = null;
+  if (mediaType === 'mixed') {
+    const estimatedSegments = Math.max(
+      3,
+      Math.ceil(scriptText.trim().split(/\s+/).length / 25)
+    );
+    mixedAssignments = assignMixedMediaTypes(estimatedSegments);
+  }
+
   try {
-    const segments = await processListicleContent(scriptText, listInfo);
-    
-    // Validation
-    const validSegments = segments.filter(seg => seg.text && seg.mediaQuery);
-    if (validSegments.length < segments.length) {
-      console.warn(`⚠️ ${segments.length - validSegments.length} segments had invalid data`);
-    }
-    
-    console.log(`✅ Successfully generated ${validSegments.length} listicle segments`);
+    const segments = await processListicleContent(
+      scriptText, listInfo, mediaType, mixedAssignments
+    );
+
+    const validSegments = segments.filter(seg => {
+      if (mediaType === 'images') return seg.text && seg.imageQuery;
+      if (mediaType === 'videos') return seg.text && seg.videoQuery;
+      return seg.text && (seg.imageQuery || seg.videoQuery);
+    });
+
+    console.log(`✅ Generated ${validSegments.length} valid listicle segments`);
     return validSegments;
-    
-  } catch (unifiedError) {
-    console.error('❌ Listicle AI approach failed:', unifiedError.message);
-    console.log('🔄 Falling back to basic listicle approach...');
-    
+
+  } catch (aiError) {
+    console.error('❌ Listicle AI segmentation failed:', aiError.message);
+    console.log('🔄 Falling back to basic listicle segmentation...');
+
     try {
-      const fallbackSegments = await generateListicleFallback(scriptText, listInfo);
-      console.log('✅ Listicle fallback approach successful');
-      return fallbackSegments;
-      
+      const fallback = generateListicleFallback(
+        scriptText, listInfo, mediaType, mixedAssignments
+      );
+      console.log(`✅ Listicle fallback successful (${fallback.length} segments)`);
+      return fallback;
+
     } catch (fallbackError) {
       console.error('❌ All listicle approaches failed:', fallbackError.message);
-      
-      // Final fallback
+      const assignedType = mixedAssignments?.[0] || 'image';
       return [{
         text: scriptText.slice(0, 200) + '...',
         duration: 0,
-        mediaQuery: listInfo.celebNames.length > 0 
-          ? `${listInfo.celebNames[0]} photos`
-          : 'relevant listicle content'
+        mediaType: mediaType === 'mixed' ? assignedType : undefined,
+        imageQuery: mediaType !== 'videos' ? buildFallbackQuery(listInfo.celebNames, 0, 'image') : null,
+        videoQuery: mediaType !== 'images' ? buildFallbackQuery(listInfo.celebNames, 0, 'video') : null,
       }];
     }
   }
