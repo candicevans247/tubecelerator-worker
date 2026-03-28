@@ -63,7 +63,8 @@ async function initJobsTable() {
           caption_data JSONB,                       
           segments JSONB,
           segments_audio JSONB,
-          media_queries JSONB,
+          image_queries JSONB,
+          video_queries JSONB,
           result_audio TEXT,
           result_video TEXT,
           error_message TEXT,
@@ -96,7 +97,14 @@ async function initJobsTable() {
       } catch (error) {
         console.log('ℹ️ Caption columns already exist');
       }
-      
+      // ✅ ADD: image_queries and video_queries columns
+try {
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS image_queries JSONB`);
+  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS video_queries JSONB`);
+  console.log('✅ Query columns added/verified');
+} catch (error) {
+  console.log('ℹ️ Query columns already exist');
+}
       console.log('✅ Jobs table verified');
     }
 
@@ -440,26 +448,47 @@ async function processJob(job) {
         let segments;
         const contentFlow = job.content_flow || 'news';
 
-        if (contentFlow === 'listicle') {
-          console.log(`> [worker] Using listicle text processor for job ${job.id}`);
-          segments = await generateListicleSegments(job.script);
-        } else {
-          console.log(`> [worker] Using news text processor for job ${job.id}`);
-          segments = await generateSegments(job.script);
-        }
+        const mediaType = job.media_type || 'images';
+
+if (contentFlow === 'listicle') {
+  console.log(`> [worker] Using listicle text processor for job ${job.id}`);
+  segments = await generateListicleSegments(job.script, mediaType);
+} else {
+  console.log(`> [worker] Using news text processor for job ${job.id}`);
+  segments = await generateSegments(job.script, mediaType);
+}
 
         const mappedSegments = segments.map(s => ({
-          text: s.text,
-          duration: 0,
-        }));
-        const mediaQueries = segments.map(s => s.mediaQuery);  // ✅ RENAMED
+  text: s.text,
+  duration: 0,
+  // carry mediaType for mixed mode segments
+  ...(s.mediaType ? { mediaType: s.mediaType } : {})
+}));
 
-        await pool.query(
-          `UPDATE jobs 
-           SET segments = $1, media_queries = $2, status = 'segments_ready', updated_at = NOW()
-           WHERE id = $3`,
-          [JSON.stringify(mappedSegments), JSON.stringify(mediaQueries), job.id]
-        );
+// Extract separate query arrays — null where not applicable
+const imageQueries = segments.map(s => s.imageQuery || null);
+const videoQueries = segments.map(s => s.videoQuery || null);
+
+await pool.query(
+  `UPDATE jobs 
+   SET segments = $1,
+       image_queries = $2,
+       video_queries = $3,
+       status = 'segments_ready',
+       updated_at = NOW()
+   WHERE id = $4`,
+  [
+    JSON.stringify(mappedSegments),
+    JSON.stringify(imageQueries),
+    JSON.stringify(videoQueries),
+    job.id
+  ]
+);
+
+console.log(
+  `> [worker] Job ${job.id} segments ready ` +
+  `(${contentFlow} flow, ${job.media_type || 'images'} media)`
+);
 
         console.log(`> [worker] Job ${job.id} segments ready (${contentFlow} flow)`);
         break;
@@ -518,7 +547,7 @@ async function processJob(job) {
                   segmentIndex: nextSegment.segmentIndex,
                   totalSegments: nextSegment.totalSegments,
                   segmentText: nextSegment.segmentText,
-                  query: nextSegment.mediaQuery
+                  query: (job.image_queries || [])[nextSegment.segmentIndex] || ''
                 });
               } else {
                 // Auto-fetch celebrity image
@@ -533,7 +562,7 @@ async function processJob(job) {
                   totalSegments: nextSegment.totalSegments,
                   segmentText: segmentResult.segmentText,
                   imageUrl: segmentResult.imageUrl,
-                  query: nextSegment.mediaQuery
+                  query: (job.image_queries || [])[nextSegment.segmentIndex] || ''
                 });
               }
             }
@@ -568,7 +597,7 @@ async function processJob(job) {
               segmentIndex: nextPendingSegment.segmentIndex,
               totalSegments: nextPendingSegment.totalSegments,
               segmentText: nextPendingSegment.segmentText,
-              query: nextPendingSegment.mediaQuery
+              query: (job.image_queries || [])[nextPendingSegment.segmentIndex] || ''
             });
           } else {
             // Auto-fetch
@@ -581,7 +610,7 @@ async function processJob(job) {
               totalSegments: nextPendingSegment.totalSegments,
               segmentText: nextSegmentResult.segmentText,
               imageUrl: nextSegmentResult.imageUrl,
-              query: nextPendingSegment.mediaQuery
+              query: (job.image_queries || [])[nextPendingSegment.segmentIndex] || ''
             });
           }
         } else {
