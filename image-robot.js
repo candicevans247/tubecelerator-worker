@@ -258,7 +258,7 @@ async function fetchImageForSingleSegment(jobId, segmentIndex) {
   try {
     // Get current job data INCLUDING videotype
     const jobResult = await pool.query(
-      'SELECT segments, media_queries, videotype FROM jobs WHERE id = $1', 
+      'SELECT segments, image_queries, videotype FROM jobs WHERE id = $1', 
       [jobId]
     );
     
@@ -267,7 +267,7 @@ async function fetchImageForSingleSegment(jobId, segmentIndex) {
     }
 
     const segments = jobResult.rows[0].segments || [];
-    const mediaQueries = jobResult.rows[0].media_queries || [];
+    const imageQueries = jobResult.rows[0].image_queries || [];
     const videotype = jobResult.rows[0].videotype;
 
     if (segmentIndex >= segments.length || segmentIndex >= mediaQueries.length) {
@@ -307,7 +307,7 @@ async function fetchImageForSingleSegment(jobId, segmentIndex) {
     updatedSegments[segmentIndex] = {
       ...updatedSegments[segmentIndex],
       imageUrl: finalImageUrl,
-      mediaQuery: query,
+      imageQuery: query,
       usedFallback: usedFallback,
       preferredOrientation: preferredOrientation
     };
@@ -344,13 +344,13 @@ async function fetchImageForSingleSegment(jobId, segmentIndex) {
 // ---------------------
 async function getNextPendingSegment(jobId) {
   try {
-    const jobResult = await pool.query('SELECT segments, media_queries FROM jobs WHERE id = $1', [jobId]);
+    const jobResult = await pool.query('SELECT segments, image_queries FROM jobs WHERE id = $1', [jobId]);
     if (jobResult.rows.length === 0) {
       return null;
     }
 
     const segments = jobResult.rows[0].segments || [];
-    const mediaQueries = jobResult.rows[0].media_queries || [];
+    const mediaQueries = jobResult.rows[0].image_queries || [];
 
     // Find first segment without an imageUrl
     for (let i = 0; i < segments.length; i++) {
@@ -359,7 +359,7 @@ async function getNextPendingSegment(jobId) {
           segmentIndex: i,
           totalSegments: segments.length,
           segmentText: segments[i].text,
-          mediaQuery: mediaQueries[i]
+          imageQuery: mediaQueries[i]
         };
       }
     }
