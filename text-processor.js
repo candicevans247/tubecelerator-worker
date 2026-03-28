@@ -1,8 +1,9 @@
+// text-processor.js - Celebrity Gossip Segmentation (Image/Video/Mixed aware)
 require("dotenv").config();
 
 const { openai, genAI } = require('./ai-clients');
 
-// ✅ NEW: Gemini 3 helper
+// ✅ Gemini helper
 async function generateWithGemini(systemPrompt, userPrompt) {
   try {
     const response = await genAI.models.generateContent({
@@ -10,10 +11,9 @@ async function generateWithGemini(systemPrompt, userPrompt) {
       contents: userPrompt,
       config: {
         systemInstruction: systemPrompt,
-        temperature: 1.0, // Gemini 3 default
+        temperature: 1.0,
       },
     });
-    
     return response.text.trim();
   } catch (error) {
     console.error('❌ Gemini 3 API error:', error.message);
@@ -34,257 +34,340 @@ async function generateWithOpenAI(systemPrompt, userPrompt) {
   return response.choices[0].message.content.trim();
 }
 
-// ✅ Unified AI generation
-async function generateWithAI(systemPrompt, userPrompt, preferGemini = true) {
-  if (preferGemini) {
-    try {
-      console.log('🤖 Using Gemini 3 Flash for segmentation...');
-      return await generateWithGemini(systemPrompt, userPrompt);
-    } catch (geminiError) {
-      console.warn('⚠️ Gemini failed, falling back to OpenAI:', geminiError.message);
-      return await generateWithOpenAI(systemPrompt, userPrompt);
-    }
-  } else {
-    try {
-      console.log('🤖 Using OpenAI for segmentation...');
-      return await generateWithOpenAI(systemPrompt, userPrompt);
-    } catch (openaiError) {
-      console.warn('⚠️ OpenAI failed, falling back to Gemini:', openaiError.message);
-      return await generateWithGemini(systemPrompt, userPrompt);
-    }
+// ✅ Unified AI — Gemini first, OpenAI fallback
+async function generateWithAI(systemPrompt, userPrompt) {
+  try {
+    console.log('🤖 Using Gemini 3 Flash for segmentation...');
+    return await generateWithGemini(systemPrompt, userPrompt);
+  } catch (geminiError) {
+    console.warn('⚠️ Gemini failed, falling back to OpenAI:', geminiError.message);
+    return await generateWithOpenAI(systemPrompt, userPrompt);
   }
 }
 
-// Celebrity Detection (unchanged)
-function detectCelebrities(scriptText) {
-  const celebNames = [];
-  const celebMatch = scriptText.match(
+// ✅ Extract celebrity names for accurate image/video queries
+function extractCelebrityNames(scriptText) {
+  const matches = scriptText.match(
     /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/g
   );
-  if (celebMatch) celebNames.push(...new Set(celebMatch));
-  const isCelebrityNews = celebNames.length > 0;
-
-  return {
-    celebNames,
-    isCelebrityNews
-  };
+  const names = matches ? [...new Set(matches)] : [];
+  console.log(
+    `🌟 Detected ${names.length} celebrity name(s): ${names.slice(0, 5).join(', ')}` +
+    `${names.length > 5 ? '...' : ''}`
+  );
+  return names;
 }
 
-// ✅ UPDATED: New segmentation with suspense/pacing focus
-async function generateSegmentsWithAI(scriptText, celebInfo) {
-  try {
-    const biasInstruction = celebInfo.isCelebrityNews
-      ? `This is a celebrity news script about ${celebInfo.celebNames.join(", ")}.
-CRITICAL: When generating image queries, ALWAYS include the specific celebrity's name for accuracy.
-Focus on: red carpet appearances, event photos, candid paparazzi shots, social media posts, relationship photos.
-Examples: "Gabriel Guevara headshot", "Nicole Wallace red carpet", "Gabriel Guevara Maria Denady couple" - NOT generic "actor photo".`
-      : `This is a general news script. Generate visually relevant image queries for each segment.`;
+// ✅ Fisher-Yates shuffle for mixed mode assignment
+function assignMixedMediaTypes(totalSegments) {
+  const videoCount = Math.round(totalSegments * 0.6);
+  const imageCount = totalSegments - videoCount;
 
-    const systemPrompt = `You are an expert at creating engaging video segments with strategically matched image queries for news/entertainment content.
+  const assignments = [
+    ...Array(videoCount).fill('video'),
+    ...Array(imageCount).fill('image')
+  ];
 
-CELEBRITY DETECTION: ${celebInfo.isCelebrityNews ? 'YES' : 'NO'}
-${celebInfo.isCelebrityNews ? `CELEBRITIES FOUND: ${celebInfo.celebNames.join(', ')}` : ''}
+  // Fisher-Yates shuffle
+  for (let i = assignments.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [assignments[i], assignments[j]] = [assignments[j], assignments[i]];
+  }
 
-INSTRUCTIONS:
-${biasInstruction}
+  console.log(
+    `🎲 Mixed mode: ${videoCount} videos + ${imageCount} images across ${totalSegments} segments`
+  );
+  return assignments;
+}
 
-🎬 CRITICAL SEGMENTATION RULES (HIGHEST PRIORITY):
-1. Break the script into short, natural narration segments
-2. Each segment should represent ONE clear idea, beat, or emotional turn
-3. Prioritize SUSPENSE and PACING over paragraph length
-4. Create segments that build anticipation and keep viewers engaged
-5. Break at emotional beats, revelations, cliffhangers, or shifts in tone
-6. Think cinematically - each segment should feel like a scene transition
-7. Use natural pauses where a narrator would take a breath or create dramatic effect
-8. DO NOT REWRITE, REPHRASE, OR MODIFY ANY WORDS FROM THE ORIGINAL SCRIPT.
+// ✅ Build the query instruction block based on media type
+function buildQueryInstructions(mediaType, celebNames) {
+  const nameHint = celebNames.length > 0
+    ? `CELEBRITIES IN THIS SCRIPT: ${celebNames.join(', ')}\n` +
+      `Always include the specific celebrity name in every query.`
+    : `No specific names detected. Use descriptive gossip-relevant queries.`;
 
+  const imageQueryRules = `📸 IMAGE QUERY RULES:
+- Write queries as if searching Google Images for a specific celebrity photo
+- Include the celebrity's full name when known
+- Be specific and visual ("Kim Kardashian SKIMS launch 2023" NOT "businesswoman launch")
+- Prioritize: red carpet photos, paparazzi shots, event appearances, social media moments, magazine covers
+- Ensure VISUAL DIVERSITY — no two consecutive queries should return the same image
+- Never use generic queries like "celebrity photo" or "famous person"`;
 
-Your task (do this in ONE response):
-1. Split the script following the SUSPENSE and PACING rules above
-2. Generate diverse, specific Google image search queries
-3. Match each query to the most relevant segment for visual storytelling
+  const videoQueryRules = `🎬 VIDEO QUERY RULES:
+- Write queries as if searching a stock video library (Pexels) for celebrity footage
+- Include the celebrity's full name when known
+- Add action/motion context ("Beyoncé walking red carpet footage" NOT "Beyoncé photo")
+- Prioritize: event arrival footage, interview clips, performance videos, paparazzi walking shots
+- Use words like: "footage", "video", "walking", "interview", "performance", "arriving"
+- Ensure VARIETY — different types of footage across segments`;
 
-SEGMENTATION PRIORITIES:
-- Emotional beats > Paragraph structure
-- Suspense > Completeness
-- Viewer engagement > Grammar rules
-- Natural narration flow > Sentence boundaries
+  if (mediaType === 'images') {
+    return `${nameHint}\n\n${imageQueryRules}\n\nReturn each segment with an "imageQuery" field.`;
+  }
 
-Media QUERY RULES:
-- Make queries specific and searchable (for Google Images API)
-- For celebrity scripts: Include celebrity names for accuracy ("Gabriel Guevara photo" not "actor photo")
-- Ensure visual diversity - avoid repetitive queries
-- Create queries that will return relevant, high-quality images
-- Think about what viewers need to see during each segment
+  if (mediaType === 'videos') {
+    return `${nameHint}\n\n${videoQueryRules}\n\nReturn each segment with a "videoQuery" field.`;
+  }
 
-Return ONLY a JSON array in this exact format (no markdown, no code blocks):
-[
+  // mixed
+  return `${nameHint}\n\n${imageQueryRules}\n\n${videoQueryRules}\n\n` +
+    `For MIXED mode: each segment will be pre-assigned as "image" or "video".\n` +
+    `Generate the matching query type based on the "mediaType" field you receive per segment.\n` +
+    `- If mediaType is "image" → return "imageQuery"\n` +
+    `- If mediaType is "video" → return "videoQuery"`;
+}
+
+// ✅ Build JSON format instruction based on media type
+function buildJsonFormat(mediaType) {
+  if (mediaType === 'images') {
+    return `[
   {
-    "segment": "First beat of the story.",
-    "query": "specific searchable image query"
-  },
-  {
-    "segment": "Next emotional turn.",
-    "query": "different specific image query"
+    "segment": "Exact text from the script.",
+    "imageQuery": "Celebrity Name specific photo context"
   }
 ]`;
+  }
 
-    const userPrompt = `Apply the segmentation and image query strategy to this script, focusing on SUSPENSE, PACING, and EMOTIONAL BEATS:
+  if (mediaType === 'videos') {
+    return `[
+  {
+    "segment": "Exact text from the script.",
+    "videoQuery": "Celebrity Name specific video footage context"
+  }
+]`;
+  }
 
-${scriptText}
+  // mixed — mediaType field included per segment
+  return `[
+  {
+    "segment": "Exact text from the script.",
+    "mediaType": "image",
+    "imageQuery": "Celebrity Name specific photo context"
+  },
+  {
+    "segment": "Next beat from the script.",
+    "mediaType": "video",
+    "videoQuery": "Celebrity Name specific video footage context"
+  }
+]`;
+}
 
-Remember: 
-- Break at emotional beats and revelations for maximum suspense
-- Prioritize viewer engagement over traditional paragraph structure
-- Each segment should create anticipation for the next
-- Generate diverse image queries 
-- Match queries strategically to segments
-- Include celebrity names in queries when relevant`;
+// ✅ Main segmentation
+async function generateSegmentsWithAI(scriptText, celebNames, mediaType, mixedAssignments) {
+  const queryInstructions = buildQueryInstructions(mediaType, celebNames);
+  const jsonFormat = buildJsonFormat(mediaType);
 
-    const rawResult = await generateWithAI(systemPrompt, userPrompt, true);
-    
-    // Parse JSON response
-    let segmentsWithQueries;
-    try {
-      const cleanedResult = rawResult.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      segmentsWithQueries = JSON.parse(cleanedResult);
-    } catch (parseError) {
-      console.error('❌ Failed to parse JSON response:', parseError.message);
-      console.error('Raw response:', rawResult.substring(0, 500));
-      throw new Error('Invalid JSON response from AI');
-    }
+  // For mixed mode, tell the AI which segments get which type
+  const mixedContext = mediaType === 'mixed' && mixedAssignments
+    ? `\nSEGMENT MEDIA ASSIGNMENTS (follow exactly):\n` +
+      mixedAssignments.map((type, i) => `Segment ${i + 1}: ${type}`).join('\n') +
+      `\n\nMatch each segment to its assigned media type when generating queries.`
+    : '';
 
-    if (!Array.isArray(segmentsWithQueries) || segmentsWithQueries.length === 0) {
-      throw new Error('AI returned invalid segment structure');
-    }
+  const systemPrompt = `You are an expert video editor and celebrity gossip producer splitting narration scripts into visual segments.
 
-    // Convert to existing format
-    const segments = segmentsWithQueries.map((item, index) => {
-      if (!item.segment || !item.query) {
-        console.warn(`⚠️ Segment ${index + 1} missing text or query, using fallback`);
-        return {
-          text: item.segment || `Segment ${index + 1}`,
-          duration: 0,
-          mediaQuery: item.query || (celebInfo.isCelebrityNews 
-            ? `${celebInfo.celebNames[0] || 'celebrity'} photos`
-            : 'relevant stock photo')
-        };
-      }
-      
+This is ALWAYS celebrity gossip content. Every query must reflect that.
+
+${queryInstructions}
+
+🎬 SEGMENTATION RULES (HIGHEST PRIORITY):
+1. Split the script into short, punchy narration segments
+2. Each segment = ONE clear beat, revelation, or emotional turn
+3. Break at moments of drama, shock, shade, or a shift in tone
+4. Think cinematically — each segment is a scene cut
+5. Create suspense — end segments on a hook that pulls to the next
+6. Natural narration pauses = segment breaks
+7. DO NOT rewrite, rephrase, or modify any words from the original script
+8. ONLY split the existing text at natural break points
+${mixedContext}
+
+Return ONLY a JSON array in this exact format (no markdown, no code blocks):
+${jsonFormat}`;
+
+  const userPrompt = `Split this celebrity gossip script into segments with ${mediaType === 'mixed' ? 'image and video' : mediaType === 'videos' ? 'video' : 'image'} queries.
+
+Rules:
+- Break at emotional beats, revelations, and dramatic turns
+- Include celebrity names in every query where possible
+- Each query should be visually distinct and relevant
+- Do NOT change any words from the script
+${mediaType === 'mixed' ? '- Follow the segment media assignments exactly' : ''}
+
+SCRIPT:
+${scriptText}`;
+
+  const rawResult = await generateWithAI(systemPrompt, userPrompt);
+
+  // Parse JSON
+  let segmentsWithQueries;
+  try {
+    const cleaned = rawResult
+      .replace(/```json\n?/g, '')
+      .replace(/```\n?/g, '')
+      .trim();
+    segmentsWithQueries = JSON.parse(cleaned);
+  } catch (parseError) {
+    console.error('❌ Failed to parse JSON response:', parseError.message);
+    console.error('Raw response preview:', rawResult.substring(0, 500));
+    throw new Error('Invalid JSON response from AI');
+  }
+
+  if (!Array.isArray(segmentsWithQueries) || segmentsWithQueries.length === 0) {
+    throw new Error('AI returned invalid segment structure');
+  }
+
+  // Map to standard format
+  return segmentsWithQueries.map((item, index) => {
+    const base = {
+      text: item.segment || `Segment ${index + 1}`,
+      duration: 0,
+    };
+
+    if (mediaType === 'images') {
       return {
-        text: item.segment,
-        duration: 0,
-        mediaQuery: item.query
+        ...base,
+        imageQuery: item.imageQuery || buildFallbackQuery(celebNames, index, 'image')
       };
+    }
+
+    if (mediaType === 'videos') {
+      return {
+        ...base,
+        videoQuery: item.videoQuery || buildFallbackQuery(celebNames, index, 'video')
+      };
+    }
+
+    // mixed
+    const assignedType = item.mediaType || (mixedAssignments?.[index] || 'image');
+    return {
+      ...base,
+      mediaType: assignedType,
+      imageQuery: assignedType === 'image'
+        ? (item.imageQuery || buildFallbackQuery(celebNames, index, 'image'))
+        : null,
+      videoQuery: assignedType === 'video'
+        ? (item.videoQuery || buildFallbackQuery(celebNames, index, 'video'))
+        : null,
+    };
+  });
+}
+
+// ✅ Fallback query builder
+function buildFallbackQuery(celebNames, index, type) {
+  if (celebNames.length === 0) {
+    return type === 'video'
+      ? 'celebrity paparazzi walking footage'
+      : 'celebrity gossip paparazzi photo';
+  }
+  const name = celebNames[index % celebNames.length];
+  return type === 'video'
+    ? `${name} paparazzi footage`
+    : `${name} photos`;
+}
+
+// ✅ Fallback segmentation
+function generateSegmentsFallback(scriptText, celebNames, mediaType, mixedAssignments) {
+  console.warn('⚠️ Using fallback segmentation...');
+
+  const sentences = scriptText
+    .split(/[.!?]+/)
+    .filter(s => s.trim().length > 0);
+
+  const segments = [];
+  let buffer = '';
+  let wordCount = 0;
+
+  for (const sentence of sentences) {
+    const sentenceWords = sentence.trim().split(/\s+/).length;
+
+    if (wordCount + sentenceWords > 30 && buffer) {
+      segments.push({ text: buffer.trim(), duration: 0 });
+      buffer = sentence.trim();
+      wordCount = sentenceWords;
+    } else {
+      buffer += (buffer ? '. ' : '') + sentence.trim();
+      wordCount += sentenceWords;
+    }
+  }
+
+  if (buffer) segments.push({ text: buffer.trim(), duration: 0 });
+
+  return segments.map((seg, index) => {
+    if (mediaType === 'images') {
+      return { ...seg, imageQuery: buildFallbackQuery(celebNames, index, 'image') };
+    }
+    if (mediaType === 'videos') {
+      return { ...seg, videoQuery: buildFallbackQuery(celebNames, index, 'video') };
+    }
+    // mixed
+    const assignedType = mixedAssignments?.[index] || 'image';
+    return {
+      ...seg,
+      mediaType: assignedType,
+      imageQuery: assignedType === 'image' ? buildFallbackQuery(celebNames, index, 'image') : null,
+      videoQuery: assignedType === 'video' ? buildFallbackQuery(celebNames, index, 'video') : null,
+    };
+  });
+}
+
+// ✅ Main entry point
+async function generateSegments(scriptText, mediaType = 'images') {
+  console.log(`🚀 Starting celebrity gossip segment generation (media: ${mediaType})...`);
+
+  const celebNames = extractCelebrityNames(scriptText);
+
+  // Pre-assign mixed media types using Fisher-Yates
+  // We estimate segment count from word count before AI runs
+  let mixedAssignments = null;
+  if (mediaType === 'mixed') {
+    const estimatedSegments = Math.max(
+      3,
+      Math.ceil(scriptText.trim().split(/\s+/).length / 25)
+    );
+    mixedAssignments = assignMixedMediaTypes(estimatedSegments);
+    console.log(`🎲 Pre-assigned ${mixedAssignments.length} mixed media slots`);
+  }
+
+  try {
+    const segments = await generateSegmentsWithAI(
+      scriptText, celebNames, mediaType, mixedAssignments
+    );
+
+    const validSegments = segments.filter(seg => {
+      if (mediaType === 'images') return seg.text && seg.imageQuery;
+      if (mediaType === 'videos') return seg.text && seg.videoQuery;
+      return seg.text && (seg.imageQuery || seg.videoQuery);
     });
 
-    console.log(`✅ AI generated ${segments.length} segments with strategic pacing and suspense`);
-    if (celebInfo.isCelebrityNews) {
-      console.log(`📊 Celebrity news detected: ${celebInfo.celebNames.length} celebrities`);
-    }
-    
-    return segments;
-
-  } catch (error) {
-    console.error('❌ Failed to generate segments with AI:', error.message);
-    throw error;
-  }
-}
-
-// Fallback (unchanged)
-async function generateSegmentsFallback(scriptText, celebInfo) {
-  console.warn('⚠️ Using fallback segmentation approach...');
-  
-  try {
-    const sentences = scriptText.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const segments = [];
-    
-    let buffer = '';
-    let wordCount = 0;
-    
-    for (const sentence of sentences) {
-      const sentenceWords = sentence.trim().split(/\s+/).length;
-      
-      if (wordCount + sentenceWords > 30 && buffer) {
-        segments.push({ text: buffer.trim(), duration: 0 });
-        buffer = sentence.trim();
-        wordCount = sentenceWords;
-      } else {
-        buffer += (buffer ? '. ' : '') + sentence.trim();
-        wordCount += sentenceWords;
-      }
-    }
-    
-    if (buffer) {
-      segments.push({ text: buffer.trim(), duration: 0 });
-    }
-
-    const fallbackQuery = celebInfo.isCelebrityNews 
-      ? `${celebInfo.celebNames[0] || 'celebrity'} photos`
-      : 'relevant stock photo';
-      
-    return segments.map(seg => ({
-      ...seg,
-      mediaQuery: fallbackQuery
-    }));
-
-  } catch (fallbackError) {
-    console.error('❌ Even fallback failed:', fallbackError.message);
-    
-    const basicSegments = scriptText.split(/[.!?]+/)
-      .filter(s => s.trim().length > 0)
-      .slice(0, 10)
-      .map((text, index) => ({
-        text: text.trim(),
-        duration: 0,
-        mediaQuery: celebInfo.isCelebrityNews 
-          ? `${celebInfo.celebNames[0] || 'celebrity'} photos`
-          : 'relevant stock photo'
-      }));
-    
-    return basicSegments;
-  }
-}
-
-// Main entry point (unchanged)
-async function generateSegments(scriptText) {
-  console.log('🚀 Starting AI segment generation with suspense/pacing focus...');
-  
-  const celebInfo = detectCelebrities(scriptText);
-  console.log(`📊 Celebrity detection: ${celebInfo.isCelebrityNews ? 'YES' : 'NO'} (${celebInfo.celebNames.length} names found)`);
-  if (celebInfo.isCelebrityNews) {
-    console.log(`🌟 Celebrities: ${celebInfo.celebNames.slice(0, 5).join(', ')}${celebInfo.celebNames.length > 5 ? '...' : ''}`);
-  }
-
-  try {
-    const segments = await generateSegmentsWithAI(scriptText, celebInfo);
-    
-    const validSegments = segments.filter(seg => seg.text && seg.mediaQuery);
     if (validSegments.length < segments.length) {
-      console.warn(`⚠️ ${segments.length - validSegments.length} segments had invalid data`);
+      console.warn(`⚠️ ${segments.length - validSegments.length} segment(s) had invalid data, dropped`);
     }
-    
-    console.log(`✅ Successfully generated ${validSegments.length} valid segments with emotional pacing`);
+
+    console.log(`✅ Generated ${validSegments.length} valid segments`);
     return validSegments;
-    
-  } catch (unifiedError) {
-    console.error('❌ Unified AI approach failed:', unifiedError.message);
-    console.log('🔄 Falling back to basic approach...');
-    
+
+  } catch (aiError) {
+    console.error('❌ AI segmentation failed:', aiError.message);
+    console.log('🔄 Falling back to basic segmentation...');
+
     try {
-      const fallbackSegments = await generateSegmentsFallback(scriptText, celebInfo);
-      console.log('✅ Fallback approach successful');
-      return fallbackSegments;
-      
+      const fallback = generateSegmentsFallback(
+        scriptText, celebNames, mediaType, mixedAssignments
+      );
+      console.log(`✅ Fallback segmentation successful (${fallback.length} segments)`);
+      return fallback;
+
     } catch (fallbackError) {
-      console.error('❌ All approaches failed:', fallbackError.message);
-      
+      console.error('❌ All segmentation approaches failed:', fallbackError.message);
+      const assignedType = mixedAssignments?.[0] || 'image';
       return [{
         text: scriptText.slice(0, 200) + '...',
         duration: 0,
-        mediaQuery: celebInfo.isCelebrityNews 
-          ? `${celebInfo.celebNames[0] || 'celebrity'} photos`
-          : 'relevant stock photo'
+        mediaType: mediaType === 'mixed' ? assignedType : undefined,
+        imageQuery: mediaType !== 'videos' ? buildFallbackQuery(celebNames, 0, 'image') : null,
+        videoQuery: mediaType !== 'images' ? buildFallbackQuery(celebNames, 0, 'video') : null,
       }];
     }
   }
