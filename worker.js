@@ -366,6 +366,24 @@ async function notifyAllImagesComplete(jobData) {
   }
 }
 
+async function notifySegmentVideoForReview(jobData) {
+  try {
+    await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, jobData, { timeout: 10000 });
+    console.log(`> [worker] Segment video review notification sent for job ${jobData.id}`);
+  } catch (error) {
+    console.error(`> [worker] Failed to send segment video notification:`, error.message);
+  }
+}
+
+async function notifyAllVideosComplete(jobData) {
+  try {
+    await axios.post(`${FRONTEND_BASE_URL}/notify/videos-complete`, jobData, { timeout: 10000 });
+    console.log(`> [worker] Videos complete notification sent for job ${jobData.id}`);
+  } catch (error) {
+    console.error(`> [worker] Failed to send videos complete notification:`, error.message);
+  }
+}
+
 async function notifyAudioForReview(jobData) {
   try {
     await axios.post(`${FRONTEND_BASE_URL}/notify/audio-review`, jobData, { timeout: 10000 });
@@ -535,15 +553,15 @@ console.log(
         console.log(`> [worker] Auto-fetching video for segment ${nextSegment.segmentIndex + 1}`);
         const videoResult = await fetchVideoForSingleSegment(job.id, nextSegment.segmentIndex);
 
-        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
-          id: job.id,
-          user_id: job.user_id,
-          segmentIndex: nextSegment.segmentIndex,
-          totalSegments: nextSegment.totalSegments,
-          segmentText: videoResult.segmentText,
-          videoUrl: videoResult.videoUrl,
-          query: nextSegment.query
-        });
+        await notifySegmentVideoForReview({
+  id: job.id,
+  user_id: job.user_id,
+  segmentIndex: nextSegment,
+  totalSegments: jobSegments.length,
+  segmentText: videoResult.segmentText,
+  videoUrl: videoResult.videoUrl,
+  query: videoResult.query
+});
       }
 
     } else if (mediaType === 'mixed') {
@@ -566,15 +584,15 @@ console.log(
           console.log(`> [worker] Mixed: fetching VIDEO for segment ${pendingIndex + 1}`);
           const videoResult = await fetchVideoForSingleSegment(job.id, pendingIndex);
 
-          await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
-            id: job.id,
-            user_id: job.user_id,
-            segmentIndex: pendingIndex,
-            totalSegments: jobSegments.length,
-            segmentText: videoResult.segmentText,
-            videoUrl: videoResult.videoUrl,
-            query: (job.video_queries || [])[pendingIndex] || ''
-          });
+          await notifySegmentVideoForReview({
+  id: job.id,
+  user_id: job.user_id,
+  segmentIndex: nextSegment.segmentIndex,
+  totalSegments: nextSegment.totalSegments,
+  segmentText: videoResult.segmentText,
+  videoUrl: videoResult.videoUrl,
+  query: videoResult.query
+});
         } else {
           console.log(`> [worker] Mixed: fetching IMAGE for segment ${pendingIndex + 1}`);
           const imgResult = await fetchImageForSingleSegment(job.id, pendingIndex);
@@ -647,15 +665,15 @@ console.log(
         console.log(`> [worker] Mixed: fetching VIDEO for segment ${nextMixedIndex + 1}`);
         const videoResult = await fetchVideoForSingleSegment(job.id, nextMixedIndex);
 
-        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
-          id: job.id,
-          user_id: job.user_id,
-          segmentIndex: nextMixedIndex,
-          totalSegments: jobSegs.length,
-          segmentText: videoResult.segmentText,
-          videoUrl: videoResult.videoUrl,
-          query: (job.video_queries || [])[nextMixedIndex] || ''
-        });
+        await notifySegmentVideoForReview({
+  id: job.id,
+  user_id: job.user_id,
+  segmentIndex: nextSegment.segmentIndex,
+  totalSegments: nextSegment.totalSegments,
+  segmentText: videoResult.segmentText,
+  videoUrl: videoResult.videoUrl,
+  query: videoResult.query
+});
       } else {
         console.log(`> [worker] Mixed: fetching IMAGE for segment ${nextMixedIndex + 1}`);
         const imgResult = await fetchImageForSingleSegment(job.id, nextMixedIndex);
@@ -740,15 +758,15 @@ console.log(
       nextPendingVideo.segmentIndex
     );
 
-    await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
-      id: job.id,
-      user_id: job.user_id,
-      segmentIndex: nextPendingVideo.segmentIndex,
-      totalSegments: nextPendingVideo.totalSegments,
-      segmentText: videoResult.segmentText,
-      videoUrl: videoResult.videoUrl,
-      query: nextPendingVideo.query
-    });
+    await notifySegmentVideoForReview({
+  id: job.id,
+  user_id: job.user_id,
+  segmentIndex: nextPendingVideo.segmentIndex,
+  totalSegments: nextPendingVideo.totalSegments,
+  segmentText: nextVideoResult.segmentText,
+  videoUrl: nextVideoResult.videoUrl,
+  query: nextVideoResult.query
+});
 
   } else {
     console.log(`> [worker] All video segments complete for job ${job.id}`);
@@ -760,10 +778,10 @@ console.log(
       [job.id]
     );
 
-    await axios.post(`${FRONTEND_BASE_URL}/notify/videos-complete`, {
-      id: job.id,
-      user_id: job.user_id
-    });
+    await notifyAllVideosComplete({
+  id: job.id,
+  user_id: job.user_id
+});
   }
   break;
 }
