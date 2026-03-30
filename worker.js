@@ -13,8 +13,9 @@ const { generateListicleSegments } = require('./text-processor-listicle');
 const { generateAudio } = require('./audio-robot');
 const { fetchImageForSingleSegment, getNextPendingSegment, areAllSegmentsComplete, clearDownloadedUrls } = require('./image-robot');
 const { renderVideo } = require('./video-robot');
-const { generateCaptions, burnCaptionsViaService } = require('./caption-robot'); 
-
+const { fetchVideoForSingleSegment, getNextPendingVideoSegment, areAllVideosComplete, clearJobVideoUrls } = require('./video-fetch-robot');
+const { assembleVideoOnlyJob } = require('./video-assembler');
+const { generateCaptions, burnCaptionsViaService } = require('./caption-robot');
 // HTTP notification configuration
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'https://your-frontend.railway.app';
 
@@ -195,7 +196,9 @@ const ACTIONABLE_STATUSES = [
   'text_approved',
   'segments_ready',
   'image_segment_approved',
+  'video_segment_approved',
   'images_approved',
+  'videos_approved',
   'audio_approved',
   'captions_ready'
 ];
@@ -494,140 +497,296 @@ console.log(
         break;
 
       case 'segments_ready':
-        console.log(`> [worker] Starting media processing for job ${job.id} (type: ${job.media_type || 'images'}, mode: ${job.media_mode || 'auto'})...`);
+  console.log(`> [worker] Starting media processing for job ${job.id} (type: ${job.media_type || 'images'})...`);
 
-        try {
-          // Estimate durations if not set
-          const jobSegments = job.segments || [];
-          let segmentsUpdated = false;
+  try {
+    // Estimate durations if not set
+    const jobSegments = job.segments || [];
+    let segmentsUpdated = false;
 
-          jobSegments.forEach(seg => {
-            if (!seg.duration || seg.duration === 0) {
-              const words = seg.text.trim().split(/\s+/).length;
-              const estimatedSeconds = Math.ceil(words / 2.5) + 0.5;
-              seg.duration = Math.max(2, Math.min(60, estimatedSeconds));
-              segmentsUpdated = true;
-            }
-          });
+    jobSegments.forEach(seg => {
+      if (!seg.duration || seg.duration === 0) {
+        const words = seg.text.trim().split(/\s+/).length;
+        const estimatedSeconds = Math.ceil(words / 2.5) + 0.5;
+        seg.duration = Math.max(2, Math.min(60, estimatedSeconds));
+        segmentsUpdated = true;
+      }
+    });
 
-          if (segmentsUpdated) {
-            await pool.query(
-              'UPDATE jobs SET segments = $1 WHERE id = $2',
-              [JSON.stringify(jobSegments), job.id]
-            );
-          }
+    if (segmentsUpdated) {
+      await pool.query(
+        'UPDATE jobs SET segments = $1 WHERE id = $2',
+        [JSON.stringify(jobSegments), job.id]
+      );
+    }
 
-          // ✅ PHASE 1: Block Videos Only and Mixed modes
-          if (job.media_type === 'videos' || job.media_type === 'mixed') {
-            await pool.query(
-              `UPDATE jobs SET status = 'error', error_message = $1, updated_at = NOW() WHERE id = $2`,
-              ['UNDER MAINTENANCE, CHECK BACK LATER - Videos Only and Mixed modes are currently being developed', job.id]
-            );
-            break;
-          }
+    const mediaType = job.media_type || 'images';
 
-          // ✅ PHASE 1: Only handle Images Only mode
-          if (job.media_type === 'images') {
-            const nextSegment = await getNextPendingSegment(job.id);
+    if (mediaType === 'videos') {
+      // ✅ VIDEO ONLY — fetch from video-fetch-robot
+      const nextSegment = await getNextPendingVideoSegment(job.id);
 
-            if (nextSegment) {
-              await pool.query(
-                `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
-                [job.id]
-              );
+      if (nextSegment) {
+        await pool.query(
+          `UPDATE jobs SET status = 'video_segment_review', updated_at = NOW() WHERE id = $1`,
+          [job.id]
+        );
 
-              // ✅ Check mode: manual or auto
-              if (job.media_mode === 'manual') {
-                // Request user to upload image
-                console.log(`> [worker] Job ${job.id} - manual mode, requesting upload for segment ${nextSegment.segmentIndex + 1}`);
-                
-                await axios.post(`${FRONTEND_BASE_URL}/notify/segment-upload-request`, {
-                  id: job.id,
-                  user_id: job.user_id,
-                  segmentIndex: nextSegment.segmentIndex,
-                  totalSegments: nextSegment.totalSegments,
-                  segmentText: nextSegment.segmentText,
-                  query: (job.image_queries || [])[nextSegment.segmentIndex] || ''
-                });
-              } else {
-                // Auto-fetch celebrity image
-                console.log(`> [worker] Job ${job.id} - auto mode, fetching image for segment ${nextSegment.segmentIndex + 1}`);
-                
-                const segmentResult = await fetchImageForSingleSegment(job.id, nextSegment.segmentIndex);
+        console.log(`> [worker] Auto-fetching video for segment ${nextSegment.segmentIndex + 1}`);
+        const videoResult = await fetchVideoForSingleSegment(job.id, nextSegment.segmentIndex);
 
-                await axios.post(`${FRONTEND_BASE_URL}/notify/segment-image-review`, {
-                  id: job.id,
-                  user_id: job.user_id,
-                  segmentIndex: nextSegment.segmentIndex,
-                  totalSegments: nextSegment.totalSegments,
-                  segmentText: segmentResult.segmentText,
-                  imageUrl: segmentResult.imageUrl,
-                  query: (job.image_queries || [])[nextSegment.segmentIndex] || ''
-                });
-              }
-            }
-          }
-        } catch (error) {
-          console.error(`> [worker] Error in segments_ready for job ${job.id}:`, error);
-          await pool.query(
-            `UPDATE jobs SET status = 'error', error_message = $1, updated_at = NOW() WHERE id = $2`,
-            [error.message, job.id]
-          );
-        }
-        break;
+        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
+          id: job.id,
+          user_id: job.user_id,
+          segmentIndex: nextSegment.segmentIndex,
+          totalSegments: nextSegment.totalSegments,
+          segmentText: videoResult.segmentText,
+          videoUrl: videoResult.videoUrl,
+          query: nextSegment.query
+        });
+      }
 
-      case 'image_segment_approved':
-        // ✅ SIMPLIFIED: Only handle Images Only mode
-        const nextPendingSegment = await getNextPendingSegment(job.id);
+    } else if (mediaType === 'mixed') {
+      // ✅ MIXED — each segment has mediaType assigned by text-processor
+      // Find first segment without any media
+      const pendingIndex = jobSegments.findIndex(
+        seg => !seg.imageUrl && !seg.videoUrl
+      );
 
-        if (nextPendingSegment) {
-          console.log(`> [worker] Processing next celebrity image ${nextPendingSegment.segmentIndex + 1} for job ${job.id} (mode: ${job.media_mode})...`);
+      if (pendingIndex !== -1) {
+        const seg = jobSegments[pendingIndex];
+        const assignedType = seg.mediaType || 'image';
 
-          await pool.query(
-            `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
-            [job.id]
-          );
+        await pool.query(
+          `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+          [job.id]
+        );
 
-          // ✅ Check mode: manual or auto
-          if (job.media_mode === 'manual') {
-            // Request user upload
-            await axios.post(`${FRONTEND_BASE_URL}/notify/segment-upload-request`, {
-              id: job.id,
-              user_id: job.user_id,
-              segmentIndex: nextPendingSegment.segmentIndex,
-              totalSegments: nextPendingSegment.totalSegments,
-              segmentText: nextPendingSegment.segmentText,
-              query: (job.image_queries || [])[nextPendingSegment.segmentIndex] || ''
-            });
-          } else {
-            // Auto-fetch
-            const nextSegmentResult = await fetchImageForSingleSegment(job.id, nextPendingSegment.segmentIndex);
+        if (assignedType === 'video') {
+          console.log(`> [worker] Mixed: fetching VIDEO for segment ${pendingIndex + 1}`);
+          const videoResult = await fetchVideoForSingleSegment(job.id, pendingIndex);
 
-            await notifySegmentImageForReview({
-              id: job.id,
-              user_id: job.user_id,
-              segmentIndex: nextPendingSegment.segmentIndex,
-              totalSegments: nextPendingSegment.totalSegments,
-              segmentText: nextSegmentResult.segmentText,
-              imageUrl: nextSegmentResult.imageUrl,
-              query: (job.image_queries || [])[nextPendingSegment.segmentIndex] || ''
-            });
-          }
-        } else {
-          console.log(`> [worker] All celebrity images completed for job ${job.id}`);
-
-          await pool.query(
-            `UPDATE jobs SET status = 'images_approved', updated_at = NOW() WHERE id = $1`,
-            [job.id]
-          );
-
-          await notifyAllImagesComplete({
+          await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
             id: job.id,
-            user_id: job.user_id
+            user_id: job.user_id,
+            segmentIndex: pendingIndex,
+            totalSegments: jobSegments.length,
+            segmentText: videoResult.segmentText,
+            videoUrl: videoResult.videoUrl,
+            query: (job.video_queries || [])[pendingIndex] || ''
+          });
+        } else {
+          console.log(`> [worker] Mixed: fetching IMAGE for segment ${pendingIndex + 1}`);
+          const imgResult = await fetchImageForSingleSegment(job.id, pendingIndex);
+
+          await axios.post(`${FRONTEND_BASE_URL}/notify/segment-image-review`, {
+            id: job.id,
+            user_id: job.user_id,
+            segmentIndex: pendingIndex,
+            totalSegments: jobSegments.length,
+            segmentText: imgResult.segmentText,
+            imageUrl: imgResult.imageUrl,
+            query: (job.image_queries || [])[pendingIndex] || ''
           });
         }
-        break;
+      }
 
+    } else {
+      // ✅ IMAGES ONLY (default)
+      const nextSegment = await getNextPendingSegment(job.id);
+
+      if (nextSegment) {
+        await pool.query(
+          `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+          [job.id]
+        );
+
+        console.log(`> [worker] Auto-fetching celebrity image for segment ${nextSegment.segmentIndex + 1}`);
+        const segmentResult = await fetchImageForSingleSegment(job.id, nextSegment.segmentIndex);
+
+        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-image-review`, {
+          id: job.id,
+          user_id: job.user_id,
+          segmentIndex: nextSegment.segmentIndex,
+          totalSegments: nextSegment.totalSegments,
+          segmentText: segmentResult.segmentText,
+          imageUrl: segmentResult.imageUrl,
+          query: (job.image_queries || [])[nextSegment.segmentIndex] || ''
+        });
+      }
+    }
+
+  } catch (error) {
+    console.error(`> [worker] Error in segments_ready for job ${job.id}:`, error);
+    await pool.query(
+      `UPDATE jobs SET status = 'error', error_message = $1, updated_at = NOW() WHERE id = $2`,
+      [error.message, job.id]
+    );
+  }
+  break;
+
+     case 'image_segment_approved':
+  const mediaType = job.media_type || 'images';
+
+  if (mediaType === 'mixed') {
+    // Find next segment without any media
+    const jobSegs = job.segments || [];
+    const nextMixedIndex = jobSegs.findIndex(
+      seg => !seg.imageUrl && !seg.videoUrl
+    );
+
+    if (nextMixedIndex !== -1) {
+      const seg = jobSegs[nextMixedIndex];
+      const assignedType = seg.mediaType || 'image';
+
+      await pool.query(
+        `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+        [job.id]
+      );
+
+      if (assignedType === 'video') {
+        console.log(`> [worker] Mixed: fetching VIDEO for segment ${nextMixedIndex + 1}`);
+        const videoResult = await fetchVideoForSingleSegment(job.id, nextMixedIndex);
+
+        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
+          id: job.id,
+          user_id: job.user_id,
+          segmentIndex: nextMixedIndex,
+          totalSegments: jobSegs.length,
+          segmentText: videoResult.segmentText,
+          videoUrl: videoResult.videoUrl,
+          query: (job.video_queries || [])[nextMixedIndex] || ''
+        });
+      } else {
+        console.log(`> [worker] Mixed: fetching IMAGE for segment ${nextMixedIndex + 1}`);
+        const imgResult = await fetchImageForSingleSegment(job.id, nextMixedIndex);
+
+        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-image-review`, {
+          id: job.id,
+          user_id: job.user_id,
+          segmentIndex: nextMixedIndex,
+          totalSegments: jobSegs.length,
+          segmentText: imgResult.segmentText,
+          imageUrl: imgResult.imageUrl,
+          query: (job.image_queries || [])[nextMixedIndex] || ''
+        });
+      }
+
+    } else {
+      // All mixed segments complete
+      console.log(`> [worker] All mixed media segments complete for job ${job.id}`);
+      clearJobVideoUrls(job.id);
+
+      await pool.query(
+        `UPDATE jobs SET status = 'images_approved', updated_at = NOW() WHERE id = $1`,
+        [job.id]
+      );
+
+      await notifyAllImagesComplete({ id: job.id, user_id: job.user_id });
+    }
+
+  } else {
+    // Images only — existing logic unchanged
+    const nextPendingSegment = await getNextPendingSegment(job.id);
+
+    if (nextPendingSegment) {
+      console.log(`> [worker] Fetching next image ${nextPendingSegment.segmentIndex + 1} for job ${job.id}`);
+
+      await pool.query(
+        `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+        [job.id]
+      );
+
+      const nextSegmentResult = await fetchImageForSingleSegment(
+        job.id,
+        nextPendingSegment.segmentIndex
+      );
+
+      await notifySegmentImageForReview({
+        id: job.id,
+        user_id: job.user_id,
+        segmentIndex: nextPendingSegment.segmentIndex,
+        totalSegments: nextPendingSegment.totalSegments,
+        segmentText: nextSegmentResult.segmentText,
+        imageUrl: nextSegmentResult.imageUrl,
+        query: (job.image_queries || [])[nextPendingSegment.segmentIndex] || ''
+      });
+
+    } else {
+      console.log(`> [worker] All images complete for job ${job.id}`);
+
+      await pool.query(
+        `UPDATE jobs SET status = 'images_approved', updated_at = NOW() WHERE id = $1`,
+        [job.id]
+      );
+
+      await notifyAllImagesComplete({ id: job.id, user_id: job.user_id });
+    }
+  }
+  break;
+
+        case 'video_segment_approved':
+  // Videos only mode — fetch next video segment
+  const nextPendingVideo = await getNextPendingVideoSegment(job.id);
+
+  if (nextPendingVideo) {
+    console.log(`> [worker] Fetching next video segment ${nextPendingVideo.segmentIndex + 1} for job ${job.id}`);
+
+    await pool.query(
+      `UPDATE jobs SET status = 'video_segment_review', updated_at = NOW() WHERE id = $1`,
+      [job.id]
+    );
+
+    const videoResult = await fetchVideoForSingleSegment(
+      job.id,
+      nextPendingVideo.segmentIndex
+    );
+
+    await axios.post(`${FRONTEND_BASE_URL}/notify/segment-video-review`, {
+      id: job.id,
+      user_id: job.user_id,
+      segmentIndex: nextPendingVideo.segmentIndex,
+      totalSegments: nextPendingVideo.totalSegments,
+      segmentText: videoResult.segmentText,
+      videoUrl: videoResult.videoUrl,
+      query: nextPendingVideo.query
+    });
+
+  } else {
+    console.log(`> [worker] All video segments complete for job ${job.id}`);
+
+    clearJobVideoUrls(job.id);
+
+    await pool.query(
+      `UPDATE jobs SET status = 'videos_approved', updated_at = NOW() WHERE id = $1`,
+      [job.id]
+    );
+
+    await axios.post(`${FRONTEND_BASE_URL}/notify/videos-complete`, {
+      id: job.id,
+      user_id: job.user_id
+    });
+  }
+  break;
+
+case 'videos_approved':
+  // Video-only jobs go to audio
+  console.log(`> [worker] Generating audio for video-only job ${job.id}...`);
+
+  const videosAudioUrl = await generateAudio(job.id, job.voice);
+
+  await pool.query(
+    `UPDATE jobs SET result_audio = $1, status = 'audio_review', updated_at = NOW() WHERE id = $2`,
+    [videosAudioUrl, job.id]
+  );
+
+  await notifyAudioForReview({
+    id: job.id,
+    user_id: job.user_id,
+    result_audio: videosAudioUrl
+  });
+  break;
+        
       case 'images_approved':
         console.log(`> [worker] Generating audio for job ${job.id}...`);
 
@@ -650,7 +809,18 @@ console.log(
         console.log(`> [worker] Rendering celebrity video for job ${job.id}...`);
 
         // ✅ ALWAYS use regular video-robot (image-based)
-        const baseVideoUrl = await renderVideo(job.id);
+        let baseVideoUrl;
+const mediaTypeForRender = job.media_type || 'images';
+
+if (mediaTypeForRender === 'videos') {
+  console.log(`> [worker] Using video-assembler for job ${job.id}`);
+  baseVideoUrl = await assembleVideoOnlyJob(job.id);
+} else {
+  // images or mixed — video-robot handles both
+  // mixed segments already have imageUrl OR videoUrl set per segment
+  console.log(`> [worker] Using video-robot for job ${job.id}`);
+  baseVideoUrl = await renderVideo(job.id);
+}
 
         console.log(`> [worker] Base video completed for job ${job.id}`);
 
@@ -794,8 +964,10 @@ console.log(
         break;
         
       case 'text_review':
-      case 'image_segment_review':
-      case 'audio_review':
+case 'image_segment_review':
+case 'video_segment_review':
+case 'audio_review':
+
         // These are waiting states - reset to non-processing
         await pool.query(
           `UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2`,
@@ -1202,7 +1374,7 @@ app.get('/health', (req, res) => {
 
 async function startWorker() {
   console.log('🚀 Starting event-driven worker (PostgreSQL LISTEN/NOTIFY)...');
-  console.log('💡 PHASE 1: Celebrity Gossip - Images Only (Manual/Auto)');
+  console.log('💡 Celebrity Gossip — Images / Videos / Mixed pipeline active');
 
   await initJobsTable();
   await setupJobListener();
