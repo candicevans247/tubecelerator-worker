@@ -270,11 +270,11 @@ async function fetchImageForSingleSegment(jobId, segmentIndex) {
     const imageQueries = jobResult.rows[0].image_queries || [];
     const videotype = jobResult.rows[0].videotype;
 
-    if (segmentIndex >= segments.length || segmentIndex >= mediaQueries.length) {
+    if (segmentIndex >= segments.length || segmentIndex >= imageQueries.length) {
       throw new Error(`Invalid segment index ${segmentIndex} for job ${jobId}`);
     }
 
-    const query = mediaQueries[segmentIndex];
+    const query = imageQueries[segmentIndex];
     if (!query) {
       throw new Error(`No media query found for segment ${segmentIndex}`);
     }
@@ -350,16 +350,16 @@ async function getNextPendingSegment(jobId) {
     }
 
     const segments = jobResult.rows[0].segments || [];
-    const mediaQueries = jobResult.rows[0].image_queries || [];
+    const imageQueries = jobResult.rows[0].image_queries || [];
 
     // Find first segment without an imageUrl
     for (let i = 0; i < segments.length; i++) {
-      if (!segments[i].imageUrl && mediaQueries[i]) {
+      if (!segments[i].imageUrl && imageQueries[i]) {
         return {
           segmentIndex: i,
           totalSegments: segments.length,
           segmentText: segments[i].text,
-          imageQuery: mediaQueries[i]
+          imageQuery: imageQueries[i]
         };
       }
     }
