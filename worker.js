@@ -625,11 +625,10 @@ console.log(
   }
   break;
 
-     case 'image_segment_approved':
+     case 'image_segment_approved': {
   const mediaType = job.media_type || 'images';
 
   if (mediaType === 'mixed') {
-    // Find next segment without any media
     const jobSegs = job.segments || [];
     const nextMixedIndex = jobSegs.findIndex(
       seg => !seg.imageUrl && !seg.videoUrl
@@ -673,7 +672,6 @@ console.log(
       }
 
     } else {
-      // All mixed segments complete
       console.log(`> [worker] All mixed media segments complete for job ${job.id}`);
       clearJobVideoUrls(job.id);
 
@@ -686,7 +684,7 @@ console.log(
     }
 
   } else {
-    // Images only — existing logic unchanged
+    // Images only
     const nextPendingSegment = await getNextPendingSegment(job.id);
 
     if (nextPendingSegment) {
@@ -724,9 +722,9 @@ console.log(
     }
   }
   break;
+}
 
-        case 'video_segment_approved':
-  // Videos only mode — fetch next video segment
+        case 'video_segment_approved': {
   const nextPendingVideo = await getNextPendingVideoSegment(job.id);
 
   if (nextPendingVideo) {
@@ -768,6 +766,7 @@ console.log(
     });
   }
   break;
+}
 
 case 'videos_approved':
   // Video-only jobs go to audio
@@ -1244,6 +1243,100 @@ app.post('/upload-segment-image', async (req, res) => {
     }
   } catch (error) {
     console.error('Upload segment image error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/approve-video-segment', async (req, res) => {
+  try {
+    const { jobId, segmentIndex } = req.body;
+
+    if (!jobId || segmentIndex === undefined) {
+      return res.status(400).json({ success: false, error: 'Missing jobId or segmentIndex' });
+    }
+
+    const jobResult = await pool.query('SELECT segments FROM jobs WHERE id = $1', [jobId]);
+
+    if (jobResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Job not found' });
+    }
+
+    const segments = jobResult.rows[0].segments || [];
+
+    if (segmentIndex < 0 || segmentIndex >= segments.length) {
+      return res.status(400).json({ success: false, error: `Invalid segment index ${segmentIndex}` });
+    }
+
+    // Mark this specific segment as approved
+    segments[segmentIndex] = {
+      ...segments[segmentIndex],
+      videoApproved: true
+    };
+
+    await pool.query(
+      'UPDATE jobs SET segments = $1, status = $2, updated_at = NOW() WHERE id = $3',
+      [JSON.stringify(segments), 'video_segment_approved', jobId]
+    );
+
+    console.log(`> [worker] Video segment ${segmentIndex} approved for job ${jobId}`);
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('> [worker] Error approving video segment:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/refetch-video-segment', async (req, res) => {
+  try {
+    const { jobId, segmentIndex } = req.body;
+
+    if (!jobId || segmentIndex === undefined) {
+      return res.status(400).json({ success: false, error: 'Missing jobId or segmentIndex' });
+    }
+
+    const jobResult = await pool.query('SELECT segments FROM jobs WHERE id = $1', [jobId]);
+
+    if (jobResult.rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Job not found' });
+    }
+
+    const segments = jobResult.rows[0].segments || [];
+
+    if (segmentIndex < 0 || segmentIndex >= segments.length) {
+      return res.status(400).json({ success: false, error: `Invalid segment index ${segmentIndex}` });
+    }
+
+    // Track this URL as rejected so video-fetch-robot avoids it
+    const currentVideoUrl = segments[segmentIndex].videoUrl;
+    const rejectedUrls = segments[segmentIndex].rejectedVideoUrls || [];
+
+    if (currentVideoUrl && !rejectedUrls.includes(currentVideoUrl)) {
+      rejectedUrls.push(currentVideoUrl);
+    }
+
+    // Clear the video URL so it gets re-fetched
+    segments[segmentIndex] = {
+      ...segments[segmentIndex],
+      videoUrl: null,
+      videoDuration: null,
+      videoSource: null,
+      videoPlatform: null,
+      videoTitle: null,
+      videoApproved: false,
+      rejectedVideoUrls: rejectedUrls
+    };
+
+    await pool.query(
+      'UPDATE jobs SET segments = $1, status = $2, updated_at = NOW() WHERE id = $3',
+      [JSON.stringify(segments), 'segments_ready', jobId]
+    );
+
+    console.log(`> [worker] Video segment ${segmentIndex} marked for refetch in job ${jobId}`);
+    res.json({ success: true });
+
+  } catch (error) {
+    console.error('> [worker] Error refetching video segment:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
