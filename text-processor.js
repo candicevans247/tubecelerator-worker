@@ -154,7 +154,7 @@ function buildJsonFormat(mediaType) {
 ]`;
 }
 
-// ✅ Main segmentation
+// ✅ Main segmentation with NATURAL BREAK POINT RULES
 async function generateSegmentsWithAI(scriptText, celebNames, mediaType, mixedAssignments) {
   const queryInstructions = buildQueryInstructions(mediaType, celebNames);
   const jsonFormat = buildJsonFormat(mediaType);
@@ -172,15 +172,45 @@ This is ALWAYS celebrity gossip content. Every query must reflect that.
 
 ${queryInstructions}
 
-🎬 SEGMENTATION RULES (HIGHEST PRIORITY):
-1. Split the script into short, punchy narration segments
-2. Each segment = ONE clear beat, revelation, or emotional turn
-3. Break at moments of drama, shock, shade, or a shift in tone
-4. Think cinematically — each segment is a scene cut
-5. Create suspense — end segments on a hook that pulls to the next
-6. Natural narration pauses = segment breaks
-7. DO NOT rewrite, rephrase, or modify any words from the original script
-8. ONLY split the existing text at natural break points
+🎬 CRITICAL SEGMENTATION RULES (HIGHEST PRIORITY):
+
+1. **NATURAL BREAK POINTS ONLY** - You may ONLY split the script at these locations:
+   - End of complete sentences (. ! ?)
+   - After commas followed by conjunctions (", and" ", but" ", while" ", so")
+   - At paragraph breaks or clear topic transitions
+   - At natural transition phrases ("Meanwhile", "However", "Next", "But here's the tea")
+   
+2. **NEVER SPLIT MID-SENTENCE** - FORBIDDEN breaks:
+   ❌ Breaking a single sentence in the middle without a comma
+   ❌ Splitting before words like "before", "after", "when", "while" without a comma
+   ❌ Creating fragments that start with "..." or end with "..."
+   ❌ Breaking compound sentences at conjunctions without a comma
+   
+   Example of WRONG split:
+   ❌ Segment 1: "Robert Townsend and Cheri Jones were married for 11 years..."
+   ❌ Segment 2: "...before splitting in 2001."
+   
+   Example of CORRECT approach:
+   ✅ Segment 1: "Robert Townsend and Cheri Jones were married for 11 years before splitting in 2001."
+
+3. **MINIMUM SEGMENT LENGTH** - Each segment MUST have:
+   - At least 10-15 words (aim for 12+ words)
+   - At least one complete sentence
+   - Estimated 3-5 seconds of narration time
+   - Natural beginning and ending
+
+4. **SUSPENSE & PACING** - Build engagement while respecting natural speech:
+   - Prefer complete sentences that stand alone
+   - Break at emotional beats ONLY if there's a natural pause point (comma, sentence end)
+   - Group related sentences about the same celebrity/topic together
+   - Create anticipation through content choice, not awkward mid-sentence breaks
+   - Think: "Would a narrator naturally pause here?"
+
+5. **PRESERVE ORIGINAL TEXT**:
+   - DO NOT REWRITE, REPHRASE, OR MODIFY ANY WORDS FROM THE ORIGINAL SCRIPT
+   - Only choose where to split the existing text
+   - Keep all punctuation and phrasing exactly as written
+
 ${mixedContext}
 
 Return ONLY a JSON array in this exact format (no markdown, no code blocks):
@@ -189,7 +219,10 @@ ${jsonFormat}`;
   const userPrompt = `Split this celebrity gossip script into segments with ${mediaType === 'mixed' ? 'image and video' : mediaType === 'videos' ? 'video' : 'image'} queries.
 
 Rules:
-- Break at emotional beats, revelations, and dramatic turns
+- Only split at sentence endings, commas with conjunctions, or natural transitions
+- NEVER split a single sentence in the middle without a comma
+- Each segment must be at least 10-15 words
+- Break at emotional beats and dramatic turns, but ONLY at natural pause points
 - Include celebrity names in every query where possible
 - Each query should be visually distinct and relevant
 - Do NOT change any words from the script
@@ -218,12 +251,23 @@ ${scriptText}`;
     throw new Error('AI returned invalid segment structure');
   }
 
-  // Map to standard format
+  // Map to standard format with validation
   return segmentsWithQueries.map((item, index) => {
     const base = {
       text: item.segment || `Segment ${index + 1}`,
       duration: 0,
     };
+
+    // Validation: Check word count
+    const wordCount = base.text.trim().split(/\s+/).length;
+    if (wordCount < 8) {
+      console.warn(`⚠️ Segment ${index + 1} is too short (${wordCount} words): "${base.text.substring(0, 50)}..."`);
+    }
+
+    // Validation: Check for ellipsis fragments
+    if (base.text.trim().startsWith('...') || base.text.trim().endsWith('...')) {
+      console.warn(`⚠️ Segment ${index + 1} appears to be a fragment: "${base.text.substring(0, 50)}..."`);
+    }
 
     if (mediaType === 'images') {
       return {
@@ -314,7 +358,7 @@ function generateSegmentsFallback(scriptText, celebNames, mediaType, mixedAssign
 
 // ✅ Main entry point
 async function generateSegments(scriptText, mediaType = 'images') {
-  console.log(`🚀 Starting celebrity gossip segment generation (media: ${mediaType})...`);
+  console.log(`🚀 Starting celebrity gossip segment generation with natural break points (media: ${mediaType})...`);
 
   const celebNames = extractCelebrityNames(scriptText);
 
@@ -345,7 +389,7 @@ async function generateSegments(scriptText, mediaType = 'images') {
       console.warn(`⚠️ ${segments.length - validSegments.length} segment(s) had invalid data, dropped`);
     }
 
-    console.log(`✅ Generated ${validSegments.length} valid segments`);
+    console.log(`✅ Generated ${validSegments.length} valid segments with natural pacing`);
     return validSegments;
 
   } catch (aiError) {
