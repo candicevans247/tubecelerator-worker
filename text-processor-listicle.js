@@ -165,7 +165,7 @@ function buildJsonFormat(mediaType) {
 ]`;
 }
 
-// ✅ Build content type block
+// ✅ Build content type block with NATURAL BREAK POINT RULES
 function buildContentTypeBlock(listInfo) {
   const { celebNames, isCastBreakdown, isRankedList } = listInfo;
 
@@ -173,38 +173,107 @@ function buildContentTypeBlock(listInfo) {
     return `CONTENT TYPE: CAST BREAKDOWN
 This script introduces multiple celebrities one by one.
 
-SEGMENTATION RULES:
-- Start a new segment each time the script introduces a new celebrity
-- Group 1-3 sentences about the same person together before breaking
-- Break when the script clearly shifts to a different person
-- Look for transition phrases like "Next up", "Moving on to", "Coming in at"
-- Each celebrity should get at least 2 segments for visual variety
-- DO NOT rewrite or rephrase any words — only split at natural break points`;
+🎬 CRITICAL SEGMENTATION RULES (HIGHEST PRIORITY):
+
+1. **NATURAL BREAK POINTS ONLY** - You may ONLY split the script at these locations:
+   - End of complete sentences (. ! ?)
+   - After commas followed by conjunctions (", and" ", but" ", while" ", so")
+   - At paragraph breaks or clear topic transitions
+   - When the script introduces a new celebrity
+   - At transition phrases ("Next up", "Moving on to", "Coming in at")
+
+2. **NEVER SPLIT MID-SENTENCE** - FORBIDDEN breaks:
+   ❌ Breaking a single sentence in the middle without a comma
+   ❌ Creating fragments that start with "..." or end with "..."
+   ❌ Splitting before words like "before", "after", "when", "while" without a comma
+   
+   Example of WRONG split:
+   ❌ "Robert Townsend and Cheri Jones were married for 11 years..."
+   ❌ "...before splitting in 2001."
+   
+   Example of CORRECT approach:
+   ✅ "Robert Townsend and Cheri Jones were married for 11 years before splitting in 2001."
+
+3. **MINIMUM SEGMENT LENGTH** - Each segment MUST have:
+   - At least 10-15 words (aim for 12+ words)
+   - At least one complete sentence
+   - Natural beginning and ending
+   - Estimated 3-5 seconds of narration time
+
+4. **GROUPING RULES**:
+   - Each person should get 2-4 segments based on natural sentence breaks
+   - Group related sentences about the same person together
+   - Only start a new segment when introducing a new celebrity OR at a natural sentence break
+   - Prefer complete sentences over mid-sentence dramatic breaks
+
+5. **PRESERVE ORIGINAL TEXT**:
+   - NEVER modify, rewrite, or add words to the original script
+   - ONLY split the existing text at appropriate points
+   - Keep all original wording exactly as written`;
   }
 
   if (isRankedList) {
     return `CONTENT TYPE: RANKED GOSSIP LIST
 This script counts down or ranks celebrity moments, scandals, or events.
 
-SEGMENTATION RULES:
-- Each list item (number/rank) should start a new segment group
-- Split the setup and the reveal into separate segments for suspense
-- Break just before the major revelation of each item
-- Transition phrases like "But number 3..." = new segment
-- DO NOT rewrite or rephrase any words — only split at natural break points`;
+🎬 CRITICAL SEGMENTATION RULES (HIGHEST PRIORITY):
+
+1. **NATURAL BREAK POINTS ONLY** - You may ONLY split the script at these locations:
+   - End of complete sentences (. ! ?)
+   - After commas followed by conjunctions (", and" ", but" ", while")
+   - At paragraph breaks or clear topic transitions
+   - When introducing each new list item/rank
+   - At transition phrases ("But number 3...", "Coming in at", "Next up")
+
+2. **NEVER SPLIT MID-SENTENCE** - FORBIDDEN breaks:
+   ❌ Breaking a single sentence without a natural pause point
+   ❌ Creating fragments that start with "..." or end with "..."
+   ❌ Splitting compound sentences at conjunctions without commas
+
+3. **MINIMUM SEGMENT LENGTH** - Each segment MUST have:
+   - At least 10-15 words (aim for 12+ words)
+   - At least one complete sentence
+   - Natural beginning and ending
+
+4. **GROUPING RULES**:
+   - Each list item should get dedicated segment(s)
+   - Split the setup and the reveal only if there's a natural sentence break
+   - Prefer complete sentences that build suspense over mid-sentence breaks
+
+5. **PRESERVE ORIGINAL TEXT**:
+   - NEVER modify or rewrite the original script
+   - ONLY choose where to split the existing text`;
   }
 
   return `CONTENT TYPE: CELEBRITY GOSSIP LISTICLE
 This script covers multiple celebrity topics or moments in sequence.
 
-SEGMENTATION RULES:
-- Break when the script shifts from one topic or celebrity to another
-- Group related sentences about the same topic together
-- Create suspense by splitting before revelations
-- DO NOT rewrite or rephrase any words — only split at natural break points`;
+🎬 CRITICAL SEGMENTATION RULES (HIGHEST PRIORITY):
+
+1. **NATURAL BREAK POINTS ONLY** - You may ONLY split the script at these locations:
+   - End of complete sentences (. ! ?)
+   - After commas followed by conjunctions (", and" ", but" ", while")
+   - At paragraph breaks or clear topic transitions
+   - When the script shifts from one celebrity/topic to another
+
+2. **NEVER SPLIT MID-SENTENCE** - FORBIDDEN breaks:
+   ❌ Breaking a single sentence without a natural pause point
+   ❌ Creating fragments that start with "..." or end with "..."
+
+3. **MINIMUM SEGMENT LENGTH** - Each segment MUST have:
+   - At least 10-15 words (aim for 12+ words)
+   - At least one complete sentence
+
+4. **GROUPING RULES**:
+   - Group related sentences about the same topic together
+   - Create suspense through content, not awkward sentence breaks
+
+5. **PRESERVE ORIGINAL TEXT**:
+   - DO NOT rewrite or rephrase any words
+   - ONLY split at natural break points`;
 }
 
-// ✅ Main listicle segmentation
+// ✅ Main listicle segmentation with NATURAL BREAK POINT RULES
 async function processListicleContent(scriptText, listInfo, mediaType, mixedAssignments) {
   const contentTypeBlock = buildContentTypeBlock(listInfo);
   const queryInstructions = buildQueryInstructions(mediaType, listInfo.celebNames);
@@ -223,7 +292,7 @@ ${contentTypeBlock}
 
 ${queryInstructions}
 
-CRITICAL RULE: Do NOT modify, rewrite, or add any words to the original script. Only split and generate queries.
+CRITICAL RULE: Do NOT modify, rewrite, or add any words to the original script. Only split at natural break points and generate queries.
 ${mixedContext}
 
 Return ONLY a JSON array in this exact format (no markdown, no code blocks):
@@ -232,7 +301,10 @@ ${jsonFormat}`;
   const userPrompt = `Split this celebrity gossip listicle script into segments with ${mediaType === 'mixed' ? 'image and video' : mediaType} queries.
 
 Rules:
-- Each person or list item gets dedicated segment(s)
+- Only split at sentence endings, commas with conjunctions, or when introducing new people/topics
+- NEVER split a single sentence in the middle without a comma
+- Each segment must be at least 10-15 words
+- Each person or list item gets dedicated segment(s) with natural breaks
 - Include celebrity names in every query
 - Ensure visual variety across all queries
 - Do NOT change any words from the script
@@ -264,6 +336,17 @@ ${scriptText}`;
       text: item.segment || `Segment ${index + 1}`,
       duration: 0,
     };
+
+    // Validation: Check word count
+    const wordCount = base.text.trim().split(/\s+/).length;
+    if (wordCount < 8) {
+      console.warn(`⚠️ Segment ${index + 1} is too short (${wordCount} words): "${base.text.substring(0, 50)}..."`);
+    }
+
+    // Validation: Check for ellipsis fragments
+    if (base.text.trim().startsWith('...') || base.text.trim().endsWith('...')) {
+      console.warn(`⚠️ Segment ${index + 1} appears to be a fragment: "${base.text.substring(0, 50)}..."`);
+    }
 
     if (mediaType === 'images') {
       return {
@@ -341,7 +424,7 @@ function generateListicleFallback(scriptText, listInfo, mediaType, mixedAssignme
 
 // ✅ Main entry point
 async function generateListicleSegments(scriptText, mediaType = 'images') {
-  console.log(`🎬 Starting celebrity gossip listicle segmentation (media: ${mediaType})...`);
+  console.log(`🎬 Starting celebrity gossip listicle segmentation with natural break points (media: ${mediaType})...`);
 
   const listInfo = detectListicleStructure(scriptText);
 
@@ -375,7 +458,7 @@ async function generateListicleSegments(scriptText, mediaType = 'images') {
       return seg.text && (seg.imageQuery || seg.videoQuery);
     });
 
-    console.log(`✅ Generated ${validSegments.length} valid listicle segments`);
+    console.log(`✅ Generated ${validSegments.length} valid listicle segments with natural pacing`);
     return validSegments;
 
   } catch (aiError) {
