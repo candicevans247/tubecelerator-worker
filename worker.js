@@ -205,14 +205,15 @@ const ACTIONABLE_STATUSES = [
 
 async function setupJobListener() {
   try {
-    // Create dedicated connection for LISTEN (separate from pool)
     listenerClient = new Client({
       connectionString: process.env.DATABASE_URL,
-      // Keep connection alive
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
+      connectionTimeoutMillis: 30000,
+      // ✅ ADD: TCP keep-alive for Railway
+      keepAliveInitialDelayMillis: 0,  // Start keep-alive immediately
     });
-
+    
     listenerClient.on('error', async (err) => {
       console.error('❌ Listener client error:', err.message);
       await reconnectListener();
@@ -223,14 +224,17 @@ async function setupJobListener() {
       await reconnectListener();
     });
 
+    // ✅ ADD: Log when connection is established
+    listenerClient.on('connect', () => {
+      console.log('✅ PostgreSQL LISTEN connection established');
+    });
+
     await listenerClient.connect();
     console.log('✅ Connected to PostgreSQL for LISTEN');
 
-    // Subscribe to job notifications
     await listenerClient.query('LISTEN job_updates');
     console.log('👂 Listening for job_updates channel...');
 
-    // Handle incoming notifications
     listenerClient.on('notification', async (msg) => {
       if (msg.channel !== 'job_updates') return;
 
@@ -238,9 +242,7 @@ async function setupJobListener() {
         const payload = JSON.parse(msg.payload);
         console.log(`📬 Notification: Job ${payload.id} → ${payload.status} (${payload.operation})`);
 
-        // Only process actionable statuses
         if (ACTIONABLE_STATUSES.includes(payload.status)) {
-          // Small delay to let transaction commit
           setTimeout(() => processJobQueue(), 100);
         }
       } catch (err) {
@@ -248,9 +250,8 @@ async function setupJobListener() {
       }
     });
 
-    reconnectAttempts = 0; // Reset on successful connection
+    reconnectAttempts = 0;
 
-    // Process any existing pending jobs on startup
     console.log('🔍 Checking for existing pending jobs on startup...');
     await processJobQueue();
 
@@ -1119,9 +1120,6 @@ async function periodicHealthCheck() {
   }
 }
 
-// Run health check every 5 MINUTES
-setInterval(periodicHealthCheck, 5 * 60 * 1000);
-
 // ============================================
 // 🌐 HTTP API ENDPOINTS
 // ============================================
@@ -1489,6 +1487,9 @@ async function startWorker() {
 
   await initJobsTable();
   await setupJobListener();
+
+  // ✅ Run health check ONCE on startup (not in interval)
+  await periodicHealthCheck();
 
   console.log('✅ Worker is now event-driven');
   console.log('😴 Sleeping until database notifications arrive...');
