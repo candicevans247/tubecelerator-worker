@@ -1,6 +1,5 @@
-// worker.js - PHASE 1: Celebrity Gossip (Images Only with Manual/Auto)
+// worker.js - Webhook-Driven Video Pipeline (Serverless Compatible)
 const pool = require('./db');
-const { Client } = require('pg');
 const axios = require('axios');
 const express = require('express');
 const app = express();
@@ -16,6 +15,7 @@ const { renderVideo } = require('./video-robot');
 const { fetchVideoForSingleSegment, getNextPendingVideoSegment, areAllVideosComplete, clearJobVideoUrls } = require('./video-fetch-robot');
 const { assembleVideoOnlyJob } = require('./video-assembler');
 const { generateCaptions, burnCaptionsViaService } = require('./caption-robot');
+
 // HTTP notification configuration
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || 'https://your-frontend.railway.app';
 
@@ -27,8 +27,24 @@ const STUCK_JOB_TIMEOUT_MINUTES = 30;
 const MAX_CONCURRENT_JOBS = 3;
 let activeJobs = 0;
 
+// ✅ Webhook mode flag
+let isProcessing = false;
+
+// Statuses that need processing
+const ACTIONABLE_STATUSES = [
+  'pending',
+  'text_approved',
+  'segments_ready',
+  'image_segment_approved',
+  'video_segment_approved',
+  'images_approved',
+  'videos_approved',
+  'audio_approved',
+  'captions_ready'
+];
+
 // ============================================
-// 📊 DATABASE SETUP (Including Triggers)
+// 📊 DATABASE SETUP
 // ============================================
 
 async function initJobsTable() {
@@ -74,7 +90,7 @@ async function initJobsTable() {
           updated_at TIMESTAMP DEFAULT NOW()
         );
       `);
-
+      console.log('✅ Jobs table created');
     } else {
       // Add missing columns for existing tables
       const columns = ['content_flow', 'media_type', 'media_mode'];
@@ -98,14 +114,16 @@ async function initJobsTable() {
       } catch (error) {
         console.log('ℹ️ Caption columns already exist');
       }
-      // ✅ ADD: image_queries and video_queries columns
-try {
-  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS image_queries JSONB`);
-  await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS video_queries JSONB`);
-  console.log('✅ Query columns added/verified');
-} catch (error) {
-  console.log('ℹ️ Query columns already exist');
-}
+      
+      // Add query columns
+      try {
+        await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS image_queries JSONB`);
+        await pool.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS video_queries JSONB`);
+        console.log('✅ Query columns added/verified');
+      } catch (error) {
+        console.log('ℹ️ Query columns already exist');
+      }
+      
       console.log('✅ Jobs table verified');
     }
 
@@ -120,7 +138,7 @@ try {
       $$ LANGUAGE plpgsql;
     `);
 
-    // Create updated_at trigger (if not exists)
+    // Create updated_at trigger
     await pool.query(`
       DROP TRIGGER IF EXISTS trg_update_jobs_updated_at ON jobs;
       CREATE TRIGGER trg_update_jobs_updated_at
@@ -129,161 +147,11 @@ try {
       EXECUTE FUNCTION update_updated_at();
     `);
 
-    // ============================================
-    // 🔔 LISTEN/NOTIFY TRIGGER SETUP
-    // ============================================
-
-    // Create notification function
-    await pool.query(`
-      CREATE OR REPLACE FUNCTION notify_job_changes()
-      RETURNS TRIGGER AS $$
-      BEGIN
-        PERFORM pg_notify(
-          'job_updates',
-          json_build_object(
-            'id', NEW.id,
-            'status', NEW.status,
-            'user_id', NEW.user_id,
-            'operation', TG_OP,
-            'timestamp', EXTRACT(EPOCH FROM NOW())
-          )::text
-        );
-        RETURN NEW;
-      END;
-      $$ LANGUAGE plpgsql;
-    `);
-
-    // Trigger on INSERT
-    await pool.query(`
-      DROP TRIGGER IF EXISTS job_insert_notify ON jobs;
-      CREATE TRIGGER job_insert_notify
-      AFTER INSERT ON jobs
-      FOR EACH ROW
-      EXECUTE FUNCTION notify_job_changes();
-    `);
-
-    // Trigger on UPDATE (only when status changes)
-    await pool.query(`
-      DROP TRIGGER IF EXISTS job_update_notify ON jobs;
-      CREATE TRIGGER job_update_notify
-      AFTER UPDATE ON jobs
-      FOR EACH ROW
-      WHEN (OLD.status IS DISTINCT FROM NEW.status)
-      EXECUTE FUNCTION notify_job_changes();
-    `);
-
-    console.log('✅ LISTEN/NOTIFY triggers created successfully');
+    console.log('✅ Database setup complete');
 
   } catch (error) {
     console.error('❌ Error setting up database:', error.message);
-    // Don't throw - let the app continue
   }
-}
-
-// ============================================
-// 🔔 EVENT-DRIVEN JOB LISTENER
-// ============================================
-
-let listenerClient = null;
-let isProcessing = false;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 10;
-const RECONNECT_DELAY_MS = 5000;
-
-// Statuses that need processing
-const ACTIONABLE_STATUSES = [
-  'pending',
-  'text_approved',
-  'segments_ready',
-  'image_segment_approved',
-  'video_segment_approved',
-  'images_approved',
-  'videos_approved',
-  'audio_approved',
-  'captions_ready'
-];
-
-async function setupJobListener() {
-  try {
-    listenerClient = new Client({
-      connectionString: process.env.DATABASE_URL,
-      keepAlive: true,
-      keepAliveInitialDelayMillis: 10000,
-      connectionTimeoutMillis: 30000,
-      // ✅ ADD: TCP keep-alive for Railway
-      keepAliveInitialDelayMillis: 0,  // Start keep-alive immediately
-    });
-    
-    listenerClient.on('error', async (err) => {
-      console.error('❌ Listener client error:', err.message);
-      await reconnectListener();
-    });
-
-    listenerClient.on('end', async () => {
-      console.log('⚠️ Listener connection ended unexpectedly');
-      await reconnectListener();
-    });
-
-    // ✅ ADD: Log when connection is established
-    listenerClient.on('connect', () => {
-      console.log('✅ PostgreSQL LISTEN connection established');
-    });
-
-    await listenerClient.connect();
-    console.log('✅ Connected to PostgreSQL for LISTEN');
-
-    await listenerClient.query('LISTEN job_updates');
-    console.log('👂 Listening for job_updates channel...');
-
-    listenerClient.on('notification', async (msg) => {
-      if (msg.channel !== 'job_updates') return;
-
-      try {
-        const payload = JSON.parse(msg.payload);
-        console.log(`📬 Notification: Job ${payload.id} → ${payload.status} (${payload.operation})`);
-
-        if (ACTIONABLE_STATUSES.includes(payload.status)) {
-          setTimeout(() => processJobQueue(), 100);
-        }
-      } catch (err) {
-        console.error('❌ Error parsing notification:', err.message);
-      }
-    });
-
-    reconnectAttempts = 0;
-
-    console.log('🔍 Checking for existing pending jobs on startup...');
-    await processJobQueue();
-
-  } catch (err) {
-    console.error('❌ Failed to setup job listener:', err.message);
-    await reconnectListener();
-  }
-}
-
-async function reconnectListener() {
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    console.error('❌ Max reconnection attempts reached. Worker needs restart.');
-    return;
-  }
-
-  reconnectAttempts++;
-  console.log(`🔄 Reconnecting listener (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-
-  // Clean up old connection
-  if (listenerClient) {
-    try {
-      await listenerClient.end();
-    } catch (e) {
-      // Ignore cleanup errors
-    }
-    listenerClient = null;
-  }
-
-  // Wait before reconnecting (exponential backoff)
-  const delay = RECONNECT_DELAY_MS * Math.pow(1.5, reconnectAttempts - 1);
-  await new Promise(resolve => setTimeout(resolve, delay));
-  await setupJobListener();
 }
 
 // ============================================
@@ -293,12 +161,13 @@ async function reconnectListener() {
 async function processJobQueue() {
   // Prevent concurrent queue processing
   if (isProcessing) {
-    return;
+    console.log('⏳ Already processing, skipping duplicate trigger');
+    return { processed: 0, reason: 'already_processing' };
   }
 
   if (activeJobs >= MAX_CONCURRENT_JOBS) {
-    console.log(`⏳ At max capacity (${activeJobs}/${MAX_CONCURRENT_JOBS}), will process when slot opens`);
-    return;
+    console.log(`⏳ At max capacity (${activeJobs}/${MAX_CONCURRENT_JOBS})`);
+    return { processed: 0, reason: 'at_capacity' };
   }
 
   isProcessing = true;
@@ -318,9 +187,9 @@ async function processJobQueue() {
     );
 
     if (result.rows.length === 0) {
-      console.log('😴 No jobs to process, sleeping until next notification...');
+      console.log('😴 No jobs to process');
       isProcessing = false;
-      return;
+      return { processed: 0, reason: 'no_jobs' };
     }
 
     console.log(`📋 Processing ${result.rows.length} job(s)...`);
@@ -329,8 +198,11 @@ async function processJobQueue() {
     const promises = result.rows.map(job => processJob(job));
     await Promise.allSettled(promises);
 
+    return { processed: result.rows.length };
+
   } catch (err) {
     console.error('❌ Error processing job queue:', err.message);
+    throw err;
   } finally {
     isProcessing = false;
   }
@@ -440,7 +312,7 @@ async function processJob(job) {
       case 'pending':
         if (job.prompt && !job.script) {
           console.log(`> [worker] Generating script for job ${job.id}...`);
-          const { script, userId } = await generateScript(job.id);
+          const { script } = await generateScript(job.id);
 
           await pool.query(
             `UPDATE jobs SET script = $1, status = 'text_review', updated_at = NOW() WHERE id = $2`,
@@ -469,341 +341,331 @@ async function processJob(job) {
 
         let segments;
         const contentFlow = job.content_flow || 'news';
-
         const mediaType = job.media_type || 'images';
 
-if (contentFlow === 'listicle') {
-  console.log(`> [worker] Using listicle text processor for job ${job.id}`);
-  segments = await generateListicleSegments(job.script, mediaType);
-} else {
-  console.log(`> [worker] Using news text processor for job ${job.id}`);
-  segments = await generateSegments(job.script, mediaType);
-}
+        if (contentFlow === 'listicle') {
+          console.log(`> [worker] Using listicle text processor for job ${job.id}`);
+          segments = await generateListicleSegments(job.script, mediaType);
+        } else {
+          console.log(`> [worker] Using news text processor for job ${job.id}`);
+          segments = await generateSegments(job.script, mediaType);
+        }
 
         const mappedSegments = segments.map(s => ({
-  text: s.text,
-  duration: 0,
-  // carry mediaType for mixed mode segments
-  ...(s.mediaType ? { mediaType: s.mediaType } : {})
-}));
+          text: s.text,
+          duration: 0,
+          ...(s.mediaType ? { mediaType: s.mediaType } : {})
+        }));
 
-// Extract separate query arrays — null where not applicable
-const imageQueries = segments.map(s => s.imageQuery || null);
-const videoQueries = segments.map(s => s.videoQuery || null);
+        const imageQueries = segments.map(s => s.imageQuery || null);
+        const videoQueries = segments.map(s => s.videoQuery || null);
 
-await pool.query(
-  `UPDATE jobs 
-   SET segments = $1,
-       image_queries = $2,
-       video_queries = $3,
-       status = 'segments_ready',
-       updated_at = NOW()
-   WHERE id = $4`,
-  [
-    JSON.stringify(mappedSegments),
-    JSON.stringify(imageQueries),
-    JSON.stringify(videoQueries),
-    job.id
-  ]
-);
+        await pool.query(
+          `UPDATE jobs 
+           SET segments = $1,
+               image_queries = $2,
+               video_queries = $3,
+               status = 'segments_ready',
+               updated_at = NOW()
+           WHERE id = $4`,
+          [
+            JSON.stringify(mappedSegments),
+            JSON.stringify(imageQueries),
+            JSON.stringify(videoQueries),
+            job.id
+          ]
+        );
 
-console.log(
-  `> [worker] Job ${job.id} segments ready ` +
-  `(${contentFlow} flow, ${job.media_type || 'images'} media)`
-);
-
-        console.log(`> [worker] Job ${job.id} segments ready (${contentFlow} flow)`);
+        console.log(`> [worker] Job ${job.id} segments ready (${contentFlow} flow, ${mediaType} media)`);
         break;
 
       case 'segments_ready':
-  console.log(`> [worker] Starting media processing for job ${job.id} (type: ${job.media_type || 'images'})...`);
+        console.log(`> [worker] Starting media processing for job ${job.id} (type: ${job.media_type || 'images'})...`);
 
-  try {
-    // Estimate durations if not set
-    const jobSegments = job.segments || [];
-    let segmentsUpdated = false;
+        try {
+          // Estimate durations if not set
+          const jobSegments = job.segments || [];
+          let segmentsUpdated = false;
 
-    jobSegments.forEach(seg => {
-      if (!seg.duration || seg.duration === 0) {
-        const words = seg.text.trim().split(/\s+/).length;
-        const estimatedSeconds = Math.ceil(words / 2.5) + 0.5;
-        seg.duration = Math.max(2, Math.min(60, estimatedSeconds));
-        segmentsUpdated = true;
+          jobSegments.forEach(seg => {
+            if (!seg.duration || seg.duration === 0) {
+              const words = seg.text.trim().split(/\s+/).length;
+              const estimatedSeconds = Math.ceil(words / 2.5) + 0.5;
+              seg.duration = Math.max(2, Math.min(60, estimatedSeconds));
+              segmentsUpdated = true;
+            }
+          });
+
+          if (segmentsUpdated) {
+            await pool.query(
+              'UPDATE jobs SET segments = $1 WHERE id = $2',
+              [JSON.stringify(jobSegments), job.id]
+            );
+          }
+
+          const mediaType = job.media_type || 'images';
+
+          if (mediaType === 'videos') {
+            // VIDEO ONLY
+            const nextSegment = await getNextPendingVideoSegment(job.id);
+
+            if (nextSegment) {
+              await pool.query(
+                `UPDATE jobs SET status = 'video_segment_review', updated_at = NOW() WHERE id = $1`,
+                [job.id]
+              );
+
+              console.log(`> [worker] Auto-fetching video for segment ${nextSegment.segmentIndex + 1}`);
+              const videoResult = await fetchVideoForSingleSegment(job.id, nextSegment.segmentIndex);
+
+              await notifySegmentVideoForReview({
+                id: job.id,
+                user_id: job.user_id,
+                segmentIndex: nextSegment.segmentIndex,
+                totalSegments: nextSegment.totalSegments,
+                segmentText: videoResult.segmentText,
+                videoUrl: videoResult.videoUrl,
+                query: videoResult.query
+              });
+            }
+
+          } else if (mediaType === 'mixed') {
+            // MIXED MODE
+            const pendingIndex = jobSegments.findIndex(
+              seg => !seg.imageUrl && !seg.videoUrl
+            );
+
+            if (pendingIndex !== -1) {
+              const seg = jobSegments[pendingIndex];
+              const assignedType = seg.mediaType || 'image';
+
+              await pool.query(
+                `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+                [job.id]
+              );
+
+              if (assignedType === 'video') {
+                console.log(`> [worker] Mixed: fetching VIDEO for segment ${pendingIndex + 1}`);
+                const videoResult = await fetchVideoForSingleSegment(job.id, pendingIndex);
+
+                await notifySegmentVideoForReview({
+                  id: job.id,
+                  user_id: job.user_id,
+                  segmentIndex: pendingIndex,
+                  totalSegments: jobSegments.length,
+                  segmentText: videoResult.segmentText,
+                  videoUrl: videoResult.videoUrl,
+                  query: videoResult.query
+                });
+              } else {
+                console.log(`> [worker] Mixed: fetching IMAGE for segment ${pendingIndex + 1}`);
+                const imgResult = await fetchImageForSingleSegment(job.id, pendingIndex);
+
+                await notifySegmentImageForReview({
+                  id: job.id,
+                  user_id: job.user_id,
+                  segmentIndex: pendingIndex,
+                  totalSegments: jobSegments.length,
+                  segmentText: imgResult.segmentText,
+                  imageUrl: imgResult.imageUrl,
+                  query: (job.image_queries || [])[pendingIndex] || ''
+                });
+              }
+            }
+
+          } else {
+            // IMAGES ONLY
+            const nextSegment = await getNextPendingSegment(job.id);
+
+            if (nextSegment) {
+              await pool.query(
+                `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+                [job.id]
+              );
+
+              console.log(`> [worker] Auto-fetching image for segment ${nextSegment.segmentIndex + 1}`);
+              const segmentResult = await fetchImageForSingleSegment(job.id, nextSegment.segmentIndex);
+
+              await notifySegmentImageForReview({
+                id: job.id,
+                user_id: job.user_id,
+                segmentIndex: nextSegment.segmentIndex,
+                totalSegments: nextSegment.totalSegments,
+                segmentText: segmentResult.segmentText,
+                imageUrl: segmentResult.imageUrl,
+                query: (job.image_queries || [])[nextSegment.segmentIndex] || ''
+              });
+            }
+          }
+
+        } catch (error) {
+          console.error(`> [worker] Error in segments_ready for job ${job.id}:`, error);
+          await pool.query(
+            `UPDATE jobs SET status = 'error', error_message = $1, updated_at = NOW() WHERE id = $2`,
+            [error.message, job.id]
+          );
+        }
+        break;
+
+      case 'image_segment_approved': {
+        const mediaType = job.media_type || 'images';
+
+        if (mediaType === 'mixed') {
+          const jobSegs = job.segments || [];
+          const nextMixedIndex = jobSegs.findIndex(
+            seg => !seg.imageUrl && !seg.videoUrl
+          );
+
+          if (nextMixedIndex !== -1) {
+            const seg = jobSegs[nextMixedIndex];
+            const assignedType = seg.mediaType || 'image';
+
+            await pool.query(
+              `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+              [job.id]
+            );
+
+            if (assignedType === 'video') {
+              console.log(`> [worker] Mixed: fetching VIDEO for segment ${nextMixedIndex + 1}`);
+              const videoResult = await fetchVideoForSingleSegment(job.id, nextMixedIndex);
+
+              await notifySegmentVideoForReview({
+                id: job.id,
+                user_id: job.user_id,
+                segmentIndex: nextMixedIndex,
+                totalSegments: jobSegs.length,
+                segmentText: videoResult.segmentText,
+                videoUrl: videoResult.videoUrl,
+                query: videoResult.query
+              });
+            } else {
+              console.log(`> [worker] Mixed: fetching IMAGE for segment ${nextMixedIndex + 1}`);
+              const imgResult = await fetchImageForSingleSegment(job.id, nextMixedIndex);
+
+              await notifySegmentImageForReview({
+                id: job.id,
+                user_id: job.user_id,
+                segmentIndex: nextMixedIndex,
+                totalSegments: jobSegs.length,
+                segmentText: imgResult.segmentText,
+                imageUrl: imgResult.imageUrl,
+                query: (job.image_queries || [])[nextMixedIndex] || ''
+              });
+            }
+
+          } else {
+            console.log(`> [worker] All mixed media segments complete for job ${job.id}`);
+            clearJobVideoUrls(job.id);
+
+            await pool.query(
+              `UPDATE jobs SET status = 'images_approved', updated_at = NOW() WHERE id = $1`,
+              [job.id]
+            );
+
+            await notifyAllImagesComplete({ id: job.id, user_id: job.user_id });
+          }
+
+        } else {
+          // Images only
+          const nextPendingSegment = await getNextPendingSegment(job.id);
+
+          if (nextPendingSegment) {
+            console.log(`> [worker] Fetching next image ${nextPendingSegment.segmentIndex + 1} for job ${job.id}`);
+
+            await pool.query(
+              `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
+              [job.id]
+            );
+
+            const nextSegmentResult = await fetchImageForSingleSegment(
+              job.id,
+              nextPendingSegment.segmentIndex
+            );
+
+            await notifySegmentImageForReview({
+              id: job.id,
+              user_id: job.user_id,
+              segmentIndex: nextPendingSegment.segmentIndex,
+              totalSegments: nextPendingSegment.totalSegments,
+              segmentText: nextSegmentResult.segmentText,
+              imageUrl: nextSegmentResult.imageUrl,
+              query: (job.image_queries || [])[nextPendingSegment.segmentIndex] || ''
+            });
+
+          } else {
+            console.log(`> [worker] All images complete for job ${job.id}`);
+
+            await pool.query(
+              `UPDATE jobs SET status = 'images_approved', updated_at = NOW() WHERE id = $1`,
+              [job.id]
+            );
+
+            await notifyAllImagesComplete({ id: job.id, user_id: job.user_id });
+          }
+        }
+        break;
       }
-    });
 
-    if (segmentsUpdated) {
-      await pool.query(
-        'UPDATE jobs SET segments = $1 WHERE id = $2',
-        [JSON.stringify(jobSegments), job.id]
-      );
-    }
+      case 'video_segment_approved': {
+        const nextPendingVideo = await getNextPendingVideoSegment(job.id);
 
-    const mediaType = job.media_type || 'images';
+        if (nextPendingVideo) {
+          console.log(`> [worker] Fetching next video segment ${nextPendingVideo.segmentIndex + 1} for job ${job.id}`);
 
-    if (mediaType === 'videos') {
-      // ✅ VIDEO ONLY — fetch from video-fetch-robot
-      const nextSegment = await getNextPendingVideoSegment(job.id);
+          await pool.query(
+            `UPDATE jobs SET status = 'video_segment_review', updated_at = NOW() WHERE id = $1`,
+            [job.id]
+          );
 
-      if (nextSegment) {
-        await pool.query(
-          `UPDATE jobs SET status = 'video_segment_review', updated_at = NOW() WHERE id = $1`,
-          [job.id]
-        );
-
-        console.log(`> [worker] Auto-fetching video for segment ${nextSegment.segmentIndex + 1}`);
-        const videoResult = await fetchVideoForSingleSegment(job.id, nextSegment.segmentIndex);
-
-        await notifySegmentVideoForReview({
-  id: job.id,
-  user_id: job.user_id,
-  segmentIndex: nextSegment,
-  totalSegments: jobSegments.length,
-  segmentText: videoResult.segmentText,
-  videoUrl: videoResult.videoUrl,
-  query: videoResult.query
-});
-      }
-
-    } else if (mediaType === 'mixed') {
-      // ✅ MIXED — each segment has mediaType assigned by text-processor
-      // Find first segment without any media
-      const pendingIndex = jobSegments.findIndex(
-        seg => !seg.imageUrl && !seg.videoUrl
-      );
-
-      if (pendingIndex !== -1) {
-        const seg = jobSegments[pendingIndex];
-        const assignedType = seg.mediaType || 'image';
-
-        await pool.query(
-          `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
-          [job.id]
-        );
-
-        if (assignedType === 'video') {
-          console.log(`> [worker] Mixed: fetching VIDEO for segment ${pendingIndex + 1}`);
-          const videoResult = await fetchVideoForSingleSegment(job.id, pendingIndex);
+          const videoResult = await fetchVideoForSingleSegment(
+            job.id,
+            nextPendingVideo.segmentIndex
+          );
 
           await notifySegmentVideoForReview({
-  id: job.id,
-  user_id: job.user_id,
-  segmentIndex: nextSegment.segmentIndex,
-  totalSegments: nextSegment.totalSegments,
-  segmentText: videoResult.segmentText,
-  videoUrl: videoResult.videoUrl,
-  query: videoResult.query
-});
-        } else {
-          console.log(`> [worker] Mixed: fetching IMAGE for segment ${pendingIndex + 1}`);
-          const imgResult = await fetchImageForSingleSegment(job.id, pendingIndex);
-
-          await axios.post(`${FRONTEND_BASE_URL}/notify/segment-image-review`, {
             id: job.id,
             user_id: job.user_id,
-            segmentIndex: pendingIndex,
-            totalSegments: jobSegments.length,
-            segmentText: imgResult.segmentText,
-            imageUrl: imgResult.imageUrl,
-            query: (job.image_queries || [])[pendingIndex] || ''
+            segmentIndex: nextPendingVideo.segmentIndex,
+            totalSegments: nextPendingVideo.totalSegments,
+            segmentText: videoResult.segmentText,
+            videoUrl: videoResult.videoUrl,
+            query: videoResult.query
+          });
+
+        } else {
+          console.log(`> [worker] All video segments complete for job ${job.id}`);
+
+          clearJobVideoUrls(job.id);
+
+          await pool.query(
+            `UPDATE jobs SET status = 'videos_approved', updated_at = NOW() WHERE id = $1`,
+            [job.id]
+          );
+
+          await notifyAllVideosComplete({
+            id: job.id,
+            user_id: job.user_id
           });
         }
+        break;
       }
 
-    } else {
-      // ✅ IMAGES ONLY (default)
-      const nextSegment = await getNextPendingSegment(job.id);
+      case 'videos_approved':
+        console.log(`> [worker] Generating audio for video-only job ${job.id}...`);
 
-      if (nextSegment) {
+        const videosAudioUrl = await generateAudio(job.id, job.voice);
+
         await pool.query(
-          `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
-          [job.id]
+          `UPDATE jobs SET result_audio = $1, status = 'audio_review', updated_at = NOW() WHERE id = $2`,
+          [videosAudioUrl, job.id]
         );
 
-        console.log(`> [worker] Auto-fetching celebrity image for segment ${nextSegment.segmentIndex + 1}`);
-        const segmentResult = await fetchImageForSingleSegment(job.id, nextSegment.segmentIndex);
-
-        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-image-review`, {
+        await notifyAudioForReview({
           id: job.id,
           user_id: job.user_id,
-          segmentIndex: nextSegment.segmentIndex,
-          totalSegments: nextSegment.totalSegments,
-          segmentText: segmentResult.segmentText,
-          imageUrl: segmentResult.imageUrl,
-          query: (job.image_queries || [])[nextSegment.segmentIndex] || ''
+          result_audio: videosAudioUrl
         });
-      }
-    }
-
-  } catch (error) {
-    console.error(`> [worker] Error in segments_ready for job ${job.id}:`, error);
-    await pool.query(
-      `UPDATE jobs SET status = 'error', error_message = $1, updated_at = NOW() WHERE id = $2`,
-      [error.message, job.id]
-    );
-  }
-  break;
-
-     case 'image_segment_approved': {
-  const mediaType = job.media_type || 'images';
-
-  if (mediaType === 'mixed') {
-    const jobSegs = job.segments || [];
-    const nextMixedIndex = jobSegs.findIndex(
-      seg => !seg.imageUrl && !seg.videoUrl
-    );
-
-    if (nextMixedIndex !== -1) {
-      const seg = jobSegs[nextMixedIndex];
-      const assignedType = seg.mediaType || 'image';
-
-      await pool.query(
-        `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
-        [job.id]
-      );
-
-      if (assignedType === 'video') {
-        console.log(`> [worker] Mixed: fetching VIDEO for segment ${nextMixedIndex + 1}`);
-        const videoResult = await fetchVideoForSingleSegment(job.id, nextMixedIndex);
-
-        await notifySegmentVideoForReview({
-  id: job.id,
-  user_id: job.user_id,
-  segmentIndex: nextSegment.segmentIndex,
-  totalSegments: nextSegment.totalSegments,
-  segmentText: videoResult.segmentText,
-  videoUrl: videoResult.videoUrl,
-  query: videoResult.query
-});
-      } else {
-        console.log(`> [worker] Mixed: fetching IMAGE for segment ${nextMixedIndex + 1}`);
-        const imgResult = await fetchImageForSingleSegment(job.id, nextMixedIndex);
-
-        await axios.post(`${FRONTEND_BASE_URL}/notify/segment-image-review`, {
-          id: job.id,
-          user_id: job.user_id,
-          segmentIndex: nextMixedIndex,
-          totalSegments: jobSegs.length,
-          segmentText: imgResult.segmentText,
-          imageUrl: imgResult.imageUrl,
-          query: (job.image_queries || [])[nextMixedIndex] || ''
-        });
-      }
-
-    } else {
-      console.log(`> [worker] All mixed media segments complete for job ${job.id}`);
-      clearJobVideoUrls(job.id);
-
-      await pool.query(
-        `UPDATE jobs SET status = 'images_approved', updated_at = NOW() WHERE id = $1`,
-        [job.id]
-      );
-
-      await notifyAllImagesComplete({ id: job.id, user_id: job.user_id });
-    }
-
-  } else {
-    // Images only
-    const nextPendingSegment = await getNextPendingSegment(job.id);
-
-    if (nextPendingSegment) {
-      console.log(`> [worker] Fetching next image ${nextPendingSegment.segmentIndex + 1} for job ${job.id}`);
-
-      await pool.query(
-        `UPDATE jobs SET status = 'image_segment_review', updated_at = NOW() WHERE id = $1`,
-        [job.id]
-      );
-
-      const nextSegmentResult = await fetchImageForSingleSegment(
-        job.id,
-        nextPendingSegment.segmentIndex
-      );
-
-      await notifySegmentImageForReview({
-        id: job.id,
-        user_id: job.user_id,
-        segmentIndex: nextPendingSegment.segmentIndex,
-        totalSegments: nextPendingSegment.totalSegments,
-        segmentText: nextSegmentResult.segmentText,
-        imageUrl: nextSegmentResult.imageUrl,
-        query: (job.image_queries || [])[nextPendingSegment.segmentIndex] || ''
-      });
-
-    } else {
-      console.log(`> [worker] All images complete for job ${job.id}`);
-
-      await pool.query(
-        `UPDATE jobs SET status = 'images_approved', updated_at = NOW() WHERE id = $1`,
-        [job.id]
-      );
-
-      await notifyAllImagesComplete({ id: job.id, user_id: job.user_id });
-    }
-  }
-  break;
-}
-
-        case 'video_segment_approved': {
-  const nextPendingVideo = await getNextPendingVideoSegment(job.id);
-
-  if (nextPendingVideo) {
-    console.log(`> [worker] Fetching next video segment ${nextPendingVideo.segmentIndex + 1} for job ${job.id}`);
-
-    await pool.query(
-      `UPDATE jobs SET status = 'video_segment_review', updated_at = NOW() WHERE id = $1`,
-      [job.id]
-    );
-
-    const videoResult = await fetchVideoForSingleSegment(
-      job.id,
-      nextPendingVideo.segmentIndex
-    );
-
-    await notifySegmentVideoForReview({
-  id: job.id,
-  user_id: job.user_id,
-  segmentIndex: nextPendingVideo.segmentIndex,
-  totalSegments: nextPendingVideo.totalSegments,
-  segmentText: nextVideoResult.segmentText,
-  videoUrl: nextVideoResult.videoUrl,
-  query: nextVideoResult.query
-});
-
-  } else {
-    console.log(`> [worker] All video segments complete for job ${job.id}`);
-
-    clearJobVideoUrls(job.id);
-
-    await pool.query(
-      `UPDATE jobs SET status = 'videos_approved', updated_at = NOW() WHERE id = $1`,
-      [job.id]
-    );
-
-    await notifyAllVideosComplete({
-  id: job.id,
-  user_id: job.user_id
-});
-  }
-  break;
-}
-
-case 'videos_approved':
-  // Video-only jobs go to audio
-  console.log(`> [worker] Generating audio for video-only job ${job.id}...`);
-
-  const videosAudioUrl = await generateAudio(job.id, job.voice);
-
-  await pool.query(
-    `UPDATE jobs SET result_audio = $1, status = 'audio_review', updated_at = NOW() WHERE id = $2`,
-    [videosAudioUrl, job.id]
-  );
-
-  await notifyAudioForReview({
-    id: job.id,
-    user_id: job.user_id,
-    result_audio: videosAudioUrl
-  });
-  break;
+        break;
         
       case 'images_approved':
         console.log(`> [worker] Generating audio for job ${job.id}...`);
@@ -824,21 +686,18 @@ case 'videos_approved':
         break;
 
       case 'audio_approved':
-        console.log(`> [worker] Rendering celebrity video for job ${job.id}...`);
+        console.log(`> [worker] Rendering video for job ${job.id}...`);
 
-        // ✅ ALWAYS use regular video-robot (image-based)
         let baseVideoUrl;
-const mediaTypeForRender = job.media_type || 'images';
+        const mediaTypeForRender = job.media_type || 'images';
 
-if (mediaTypeForRender === 'videos') {
-  console.log(`> [worker] Using video-assembler for job ${job.id}`);
-  baseVideoUrl = await assembleVideoOnlyJob(job.id);
-} else {
-  // images or mixed — video-robot handles both
-  // mixed segments already have imageUrl OR videoUrl set per segment
-  console.log(`> [worker] Using video-robot for job ${job.id}`);
-  baseVideoUrl = await renderVideo(job.id);
-}
+        if (mediaTypeForRender === 'videos') {
+          console.log(`> [worker] Using video-assembler for job ${job.id}`);
+          baseVideoUrl = await assembleVideoOnlyJob(job.id);
+        } else {
+          console.log(`> [worker] Using video-robot for job ${job.id}`);
+          baseVideoUrl = await renderVideo(job.id);
+        }
 
         console.log(`> [worker] Base video completed for job ${job.id}`);
 
@@ -873,26 +732,37 @@ if (mediaTypeForRender === 'videos') {
               
               console.log(`> [worker] Job ${job.id} captions ready, proceeding to burn`);
             } else {
-              // No captions, mark completed
               await pool.query(
-                'UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2',
-                ['completed', job.id]
+                'UPDATE jobs SET result_video = $1, status = $2, updated_at = NOW() WHERE id = $3',
+                [baseVideoUrl, 'completed', job.id]
               );
+              
+              await notifyVideoComplete({
+                id: job.id,
+                user_id: job.user_id,
+                result_video: baseVideoUrl
+              });
             }
           } catch (captionError) {
             console.error(`> [worker] Caption generation failed for job ${job.id}:`, captionError.message);
             console.warn(`> [worker] Continuing without captions...`);
             
             await pool.query(
-              'UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2',
-              ['completed', job.id]
+              'UPDATE jobs SET result_video = $1, status = $2, updated_at = NOW() WHERE id = $3',
+              [baseVideoUrl, 'completed', job.id]
             );
+            
+            await notifyVideoComplete({
+              id: job.id,
+              user_id: job.user_id,
+              result_video: baseVideoUrl
+            });
           }
         } else {
           // No captions requested
           await pool.query(
-            'UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2',
-            ['completed', job.id]
+            'UPDATE jobs SET result_video = $1, status = $2, updated_at = NOW() WHERE id = $3',
+            [baseVideoUrl, 'completed', job.id]
           );
           
           console.log(`> [worker] Job ${job.id} completed (no captions) 🎉`);
@@ -909,7 +779,6 @@ if (mediaTypeForRender === 'videos') {
         console.log(`> [worker] Burning captions for job ${job.id}...`);
         
         try {
-          // Get current video and caption data
           const jobData = await pool.query(
             'SELECT result_video, caption_style, caption_data FROM jobs WHERE id = $1', 
             [job.id]
@@ -929,15 +798,12 @@ if (mediaTypeForRender === 'videos') {
             throw new Error('No transformed caption data found');
           }
           
-          // ✅ Use pre-transformed data
           const captionsJsData = typeof currentJob.caption_data === 'string' 
             ? JSON.parse(currentJob.caption_data) 
             : currentJob.caption_data;
           
           console.log(`✅ Using stored captions data: ${captionsJsData.length} words`);
-          console.log(`📝 Sample caption:`, captionsJsData[0]);
           
-          // Burn captions via Railway service
           const captionedVideoUrl = await burnCaptionsViaService(
             currentJob.result_video,
             captionsJsData,
@@ -945,7 +811,6 @@ if (mediaTypeForRender === 'videos') {
             job.id
           );
           
-          // Update with captioned video
           await pool.query(
             `UPDATE jobs 
              SET result_video = $1, 
@@ -982,11 +847,10 @@ if (mediaTypeForRender === 'videos') {
         break;
         
       case 'text_review':
-case 'image_segment_review':
-case 'video_segment_review':
-case 'audio_review':
-
-        // These are waiting states - reset to non-processing
+      case 'image_segment_review':
+      case 'video_segment_review':
+      case 'audio_review':
+        // Waiting states - reset to non-processing
         await pool.query(
           `UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2`,
           [originalStatus, job.id]
@@ -1004,7 +868,6 @@ case 'audio_review':
 
       default:
         console.log(`> [worker] Unknown status '${originalStatus}' for job ${job.id}`);
-        // Reset to original status
         await pool.query(
           `UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2`,
           [originalStatus, job.id]
@@ -1014,7 +877,6 @@ case 'audio_review':
   } catch (err) {
     console.error(`> [worker] Error processing job ${job.id}:`, err);
 
-    // Reset to original status on error (remove _processing suffix)
     await pool.query(
       `UPDATE jobs SET status = $1, error_message = $2, updated_at = NOW() WHERE id = $3`,
       [originalStatus, err.message, job.id]
@@ -1043,7 +905,6 @@ case 'audio_review':
 
 async function resetStuckJobs() {
   try {
-    // Reset jobs stuck in processing state
     const result = await pool.query(
       `UPDATE jobs 
        SET status = REPLACE(status, '_processing', ''),
@@ -1061,11 +922,10 @@ async function resetStuckJobs() {
       console.log(`> [worker] Reset ${result.rows.length} stuck jobs:`, result.rows.map(r => `Job ${r.id}`));
     }
 
-    // Mark permanently stuck jobs as failed
     const failedResult = await pool.query(
       `UPDATE jobs 
        SET status = 'error',
-           error_message = 'Job exceeded max retries (${MAX_RETRIES})',
+           error_message = 'Job exceeded max retries',
            updated_at = NOW()
        WHERE status LIKE '%_processing'
        AND updated_at < NOW() - INTERVAL '${STUCK_JOB_TIMEOUT_MINUTES} minutes'
@@ -1084,41 +944,37 @@ async function resetStuckJobs() {
 }
 
 // ============================================
-// 📊 PERIODIC HEALTH CHECK
+// 🔔 WEBHOOK WAKE-UP ENDPOINT
 // ============================================
 
-async function periodicHealthCheck() {
-  try {
-    // Check listener is alive
-    const listenerAlive = listenerClient && 
-                         !listenerClient.connection?.stream?.destroyed &&
-                         listenerClient._connected;
-
-    if (!listenerAlive) {
-      console.log('⚠️ Listener connection appears dead, reconnecting...');
-      await reconnectListener();
+app.post('/wake-up', async (req, res) => {
+  const { jobId, action, timestamp } = req.body;
+  
+  console.log(`⏰ Wake-up call received: Job ${jobId || 'all'}, Action: ${action || 'unknown'}`);
+  
+  // Respond immediately (don't block backend)
+  res.json({ 
+    success: true, 
+    message: 'Worker processing jobs',
+    timestamp: Date.now()
+  });
+  
+  // Process jobs in background
+  setImmediate(async () => {
+    try {
+      const result = await processJobQueue();
+      console.log(`✅ Wake-up processed: ${result.processed} job(s)`);
+      
+      // Keep processing until queue is empty
+      if (result.processed > 0 && activeJobs < MAX_CONCURRENT_JOBS) {
+        console.log('🔄 Checking for more jobs...');
+        setTimeout(() => processJobQueue(), 1000);
+      }
+    } catch (error) {
+      console.error('❌ Wake-up processing error:', error.message);
     }
-
-    // Reset stuck jobs
-    await resetStuckJobs();
-
-    // Log memory usage
-    const used = process.memoryUsage();
-    const mb = (bytes) => (bytes / 1024 / 1024).toFixed(2);
-
-    if (global.gc) {
-      const beforeGC = used.heapUsed;
-      global.gc();
-      const afterGC = process.memoryUsage().heapUsed;
-      const freed = (beforeGC - afterGC) / 1024 / 1024;
-      console.log(`🗑️ Health check GC freed ${freed.toFixed(0)}MB`);
-    }
-    console.log(`📊 Health: RSS=${mb(used.rss)}MB, Heap=${mb(used.heapUsed)}/${mb(used.heapTotal)}MB, Active=${activeJobs}, Listener=${listenerAlive ? 'OK' : 'DEAD'}`);
-
-  } catch (err) {
-    console.error('❌ Health check error:', err.message);
-  }
-}
+  });
+});
 
 // ============================================
 // 🌐 HTTP API ENDPOINTS
@@ -1158,23 +1014,6 @@ app.post('/update-script', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.get('/test-captions-service', async (req, res) => {
-  try {
-    const { testCaptionsService } = require('./caption-robot');
-    const result = await testCaptionsService();
-    
-    res.json({
-      success: result,
-      service: 'captions-service-test'
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
   }
 });
 
@@ -1283,7 +1122,6 @@ app.post('/approve-video-segment', async (req, res) => {
       return res.status(400).json({ success: false, error: `Invalid segment index ${segmentIndex}` });
     }
 
-    // Mark this specific segment as approved
     segments[segmentIndex] = {
       ...segments[segmentIndex],
       videoApproved: true
@@ -1323,7 +1161,6 @@ app.post('/refetch-video-segment', async (req, res) => {
       return res.status(400).json({ success: false, error: `Invalid segment index ${segmentIndex}` });
     }
 
-    // Track this URL as rejected so video-fetch-robot avoids it
     const currentVideoUrl = segments[segmentIndex].videoUrl;
     const rejectedUrls = segments[segmentIndex].rejectedVideoUrls || [];
 
@@ -1331,7 +1168,6 @@ app.post('/refetch-video-segment', async (req, res) => {
       rejectedUrls.push(currentVideoUrl);
     }
 
-    // Clear the video URL so it gets re-fetched
     segments[segmentIndex] = {
       ...segments[segmentIndex],
       videoUrl: null,
@@ -1371,46 +1207,6 @@ app.post('/regenerate-audio', async (req, res) => {
   try {
     const { jobId } = req.body;
     await pool.query('UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2', ['images_approved', jobId]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/trigger-segment-refetch', async (req, res) => {
-  try {
-    const { jobId, segmentIndex } = req.body;
-
-    const jobResult = await pool.query('SELECT segments FROM jobs WHERE id = $1', [jobId]);
-    if (jobResult.rows.length === 0) {
-      return res.json({ success: false, error: 'Job not found' });
-    }
-
-    const segments = jobResult.rows[0].segments || [];
-    if (segmentIndex >= 0 && segmentIndex < segments.length) {
-      segments[segmentIndex].imageUrl = null;
-
-      await pool.query(
-        'UPDATE jobs SET segments = $1, status = $2, updated_at = NOW() WHERE id = $3',
-        [JSON.stringify(segments), 'segments_ready', jobId]
-      );
-
-      res.json({ success: true });
-    } else {
-      res.json({ success: false, error: 'Invalid segment index' });
-    }
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-app.post('/trigger-regeneration', async (req, res) => {
-  try {
-    const { jobId, newStatus } = req.body;
-    await pool.query(
-      `UPDATE jobs SET status = $1, updated_at = NOW() WHERE id = $2`,
-      [newStatus, jobId]
-    );
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -1463,18 +1259,34 @@ app.post('/approve-job', async (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  const listenerStatus = listenerClient && !listenerClient.connection?.stream?.destroyed;
-
   res.json({
     status: 'healthy',
     service: 'worker',
-    mode: 'event-driven',
+    mode: 'webhook-driven',
     activeJobs,
     maxConcurrentJobs: MAX_CONCURRENT_JOBS,
-    listenerConnected: listenerStatus,
-    reconnectAttempts,
+    isProcessing,
     uptime: process.uptime()
   });
+});
+
+// Manual trigger endpoint (for testing/debugging)
+app.get('/process-jobs', async (req, res) => {
+  console.log('🔧 Manual job processing triggered');
+  
+  try {
+    const result = await processJobQueue();
+    res.json({ 
+      success: true, 
+      ...result,
+      timestamp: new Date().toISOString() 
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
 });
 
 // ============================================
@@ -1482,21 +1294,22 @@ app.get('/health', (req, res) => {
 // ============================================
 
 async function startWorker() {
-  console.log('🚀 Starting event-driven worker (PostgreSQL LISTEN/NOTIFY)...');
+  console.log('🚀 Starting webhook-driven worker...');
   console.log('💡 Celebrity Gossip — Images / Videos / Mixed pipeline active');
 
   await initJobsTable();
-  await setupJobListener();
-
-  // ✅ Run health check ONCE on startup (not in interval)
-  await periodicHealthCheck();
-
-  console.log('✅ Worker is now event-driven');
-  console.log('😴 Sleeping until database notifications arrive...');
+  
+  // Check for orphaned jobs on startup
+  console.log('🔍 Checking for pending jobs on startup...');
+  const startupResult = await processJobQueue();
+  console.log(`✅ Startup check: ${startupResult.processed} job(s) processed`);
+  
+  console.log('✅ Worker is now webhook-driven');
+  console.log('😴 Sleeping until backend webhook arrives...');
 }
 
 // Start HTTP server
-const WORKER_PORT = process.env.WORKER_PORT || 4000;
+const WORKER_PORT = process.env.PORT || 4000;
 app.listen(WORKER_PORT, () => {
   console.log(`🌐 Worker API listening on port ${WORKER_PORT}`);
   startWorker();
@@ -1505,32 +1318,12 @@ app.listen(WORKER_PORT, () => {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('🛑 Received SIGTERM, shutting down gracefully...');
-
-  if (listenerClient) {
-    try {
-      await listenerClient.query('UNLISTEN job_updates');
-      await listenerClient.end();
-    } catch (e) {
-      // Ignore errors during shutdown
-    }
-  }
-
   await pool.end();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   console.log('🛑 Received SIGINT, shutting down gracefully...');
-
-  if (listenerClient) {
-    try {
-      await listenerClient.query('UNLISTEN job_updates');
-      await listenerClient.end();
-    } catch (e) {
-      // Ignore errors during shutdown
-    }
-  }
-
   await pool.end();
   process.exit(0);
 });
