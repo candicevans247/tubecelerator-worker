@@ -154,7 +154,7 @@ function buildJsonFormat(mediaType) {
 ]`;
 }
 
-// ✅ Main segmentation with NATURAL BREAK POINT RULES
+// ✅ UPDATED: Main segmentation with BALANCED BREAK POINT RULES
 async function generateSegmentsWithAI(scriptText, celebNames, mediaType, mixedAssignments) {
   const queryInstructions = buildQueryInstructions(mediaType, celebNames);
   const jsonFormat = buildJsonFormat(mediaType);
@@ -172,61 +172,103 @@ This is ALWAYS celebrity gossip content. Every query must reflect that.
 
 ${queryInstructions}
 
-🎬 CRITICAL SEGMENTATION RULES (HIGHEST PRIORITY):
+🎬 CRITICAL SEGMENTATION RULES (BALANCED APPROACH):
 
-1. **NATURAL BREAK POINTS ONLY** - You may ONLY split the script at these locations:
+1. **SEGMENT LENGTH TARGETS**:
+   - **Minimum:** 6-8 words per segment (never less than 5 words)
+   - **Target:** 10-18 words per segment (sweet spot for pacing)
+   - **Maximum:** 25 words per segment
+   - **Duration target:** 4-7 seconds of narration per segment
+
+2. **DEFAULT: COMPLETE SENTENCES**:
+   - Keep sentences together as single segments by default
+   - DO NOT split at every comma
+   - Only split long sentences (20+ words) if needed
+
+3. **WHEN TO SPLIT LONG SENTENCES (20+ words)**:
+   - Split ONLY if the sentence has a natural break point (comma + conjunction)
+   - Split ONLY if BOTH resulting parts would be 8+ words each
+   - Look for conjunctions: ", and" ", but" ", which" ", so" ", while"
+   
+   Example of CORRECT long sentence split:
+   Original (32 words): "There's literally footage of Taylor Swift making this disgusted face while watching them kiss at an awards show, which honestly says a lot."
+   
+   ✅ Split into:
+   - Segment 1: "There's literally footage of Taylor Swift making this disgusted face while watching them kiss at an awards show,"
+   - Segment 2: "which honestly says a lot."
+   
+   Example of sentence to KEEP TOGETHER:
+   "Robert Townsend and Cheri Jones were married for 11 years before splitting in 2001." (16 words - keep as one)
+
+4. **SENTENCE GROUPING RULES**:
+   - ONLY combine two sentences if BOTH are very short (each under 7 words)
+   - Otherwise, keep sentences separate
+   
+   Examples:
+   ✅ COMBINE: "She was his first love. His song was about her." (Both short, 11 words total)
+   ❌ DON'T COMBINE: "She was his first love and his very first girlfriend. His hit song 'Never Let You Go' was about her." (Both long)
+
+5. **NATURAL BREAK POINTS**:
    - End of complete sentences (. ! ?)
-   - After commas followed by conjunctions (", and" ", but" ", while" ", so")
+   - After commas with conjunctions (", and" ", but" ", which" ", so" ", while") ONLY for sentences 20+ words
    - At paragraph breaks or clear topic transitions
    - At natural transition phrases ("Meanwhile", "However", "Next", "But here's the tea")
-   
-2. **NEVER SPLIT MID-SENTENCE** - FORBIDDEN breaks:
-   ❌ Breaking a single sentence in the middle without a comma
-   ❌ Splitting before words like "before", "after", "when", "while" without a comma
+
+6. **FORBIDDEN BREAKS**:
+   ❌ Breaking sentences under 20 words at commas
+   ❌ Creating fragments under 5 words
+   ❌ Splitting mid-sentence without a comma + conjunction
+   ❌ Breaking sentences like "Before Justin got married," / "he had been in 21 relationships" (keep together!)
    ❌ Creating fragments that start with "..." or end with "..."
-   ❌ Breaking compound sentences at conjunctions without a comma
-   
-   Example of WRONG split:
-   ❌ Segment 1: "Robert Townsend and Cheri Jones were married for 11 years..."
-   ❌ Segment 2: "...before splitting in 2001."
-   
-   Example of CORRECT approach:
-   ✅ Segment 1: "Robert Townsend and Cheri Jones were married for 11 years before splitting in 2001."
 
-3. **MINIMUM SEGMENT LENGTH** - Each segment MUST have:
-   - At least 10-15 words (aim for 12+ words)
-   - At least one complete sentence
-   - Estimated 3-5 seconds of narration time
-   - Natural beginning and ending
-
-4. **SUSPENSE & PACING** - Build engagement while respecting natural speech:
+7. **SUSPENSE & PACING** - Build engagement while respecting natural speech:
    - Prefer complete sentences that stand alone
-   - Break at emotional beats ONLY if there's a natural pause point (comma, sentence end)
+   - Break at emotional beats ONLY if there's a natural pause point (sentence end or long sentence with comma)
    - Group related sentences about the same celebrity/topic together
    - Create anticipation through content choice, not awkward mid-sentence breaks
    - Think: "Would a narrator naturally pause here?"
 
-5. **PRESERVE ORIGINAL TEXT**:
+8. **PRESERVE ORIGINAL TEXT**:
    - DO NOT REWRITE, REPHRASE, OR MODIFY ANY WORDS FROM THE ORIGINAL SCRIPT
    - Only choose where to split the existing text
    - Keep all punctuation and phrasing exactly as written
+
+CRITICAL EXAMPLES:
+
+✅ CORRECT - Keep sentences together:
+- "Robert Townsend and Cheri Jones were married for 11 years before splitting in 2001." (ONE segment, 16 words)
+- "Before Justin Bieber got married, he had been in 21 solid high-profile relationships." (ONE segment, 14 words)
+
+❌ WRONG - Over-fragmentation:
+- "Robert Townsend and Cheri Jones were married for 11 years..." (fragment)
+- "...before splitting in 2001." (orphaned clause)
+
+✅ CORRECT - Split only very long sentences:
+- "There's literally footage of Taylor Swift making this disgusted face while watching them kiss at an awards show," (22 words)
+- "which honestly says a lot." (5 words)
 
 ${mixedContext}
 
 Return ONLY a JSON array in this exact format (no markdown, no code blocks):
 ${jsonFormat}`;
 
-  const userPrompt = `Split this celebrity gossip script into segments with ${mediaType === 'mixed' ? 'image and video' : mediaType === 'videos' ? 'video' : 'image'} queries.
+  const userPrompt = `Split this celebrity gossip script into BALANCED segments with ${mediaType === 'mixed' ? 'image and video' : mediaType === 'videos' ? 'video' : 'image'} queries.
 
 Rules:
-- Only split at sentence endings, commas with conjunctions, or natural transitions
-- NEVER split a single sentence in the middle without a comma
-- Each segment must be at least 10-15 words
-- Break at emotional beats and dramatic turns, but ONLY at natural pause points
+- DEFAULT: Keep complete sentences together (under 20 words)
+- ONLY split sentences 20+ words at comma + conjunction IF both parts 8+ words
+- Target 10-15 words per segment (minimum 6, maximum 25)
+- Target 4-7 seconds per segment (not 2-3 seconds)
+- Only combine sentences if BOTH are very short (under 7 words each)
 - Include celebrity names in every query where possible
 - Each query should be visually distinct and relevant
 - Do NOT change any words from the script
 ${mediaType === 'mixed' ? '- Follow the segment media assignments exactly' : ''}
+
+Key reminders:
+✅ "Robert Townsend and Cheri Jones were married for 11 years before splitting in 2001." = ONE segment (keep together)
+❌ "Robert Townsend and Cheri Jones were married for 11 years..." + "...before splitting in 2001." = DON'T split
+✅ Split only sentences with 20+ words at natural comma breaks
 
 SCRIPT:
 ${scriptText}`;
@@ -251,7 +293,7 @@ ${scriptText}`;
     throw new Error('AI returned invalid segment structure');
   }
 
-  // Map to standard format with validation
+  // Map to standard format with BALANCED validation
   return segmentsWithQueries.map((item, index) => {
     const base = {
       text: item.segment || `Segment ${index + 1}`,
@@ -260,13 +302,25 @@ ${scriptText}`;
 
     // Validation: Check word count
     const wordCount = base.text.trim().split(/\s+/).length;
-    if (wordCount < 8) {
-      console.warn(`⚠️ Segment ${index + 1} is too short (${wordCount} words): "${base.text.substring(0, 50)}..."`);
+    if (wordCount < 5) {
+      console.warn(`⚠️ Segment ${index + 1} is too short (${wordCount} words): "${base.text.substring(0, 50)}..." - May be over-fragmented`);
+    }
+    if (wordCount > 25) {
+      console.warn(`⚠️ Segment ${index + 1} is too long (${wordCount} words): "${base.text.substring(0, 50)}..." - Consider splitting`);
     }
 
     // Validation: Check for ellipsis fragments
     if (base.text.trim().startsWith('...') || base.text.trim().endsWith('...')) {
       console.warn(`⚠️ Segment ${index + 1} appears to be a fragment: "${base.text.substring(0, 50)}..."`);
+    }
+
+    // Validation: Warn about potential over-fragmentation
+    if (wordCount >= 5 && wordCount <= 7) {
+      const endsWithComma = base.text.trim().endsWith(',');
+      const startsWithConjunction = /^(and|but|which|so|while|because)\b/i.test(base.text.trim());
+      if (endsWithComma || startsWithConjunction) {
+        console.warn(`⚠️ Segment ${index + 1} may be an orphaned clause (${wordCount} words): "${base.text.substring(0, 50)}..."`);
+      }
     }
 
     if (mediaType === 'images') {
@@ -311,32 +365,40 @@ function buildFallbackQuery(celebNames, index, type) {
     : `${name} photos`;
 }
 
-// ✅ Fallback segmentation
+// ✅ UPDATED: Balanced fallback segmentation
 function generateSegmentsFallback(scriptText, celebNames, mediaType, mixedAssignments) {
-  console.warn('⚠️ Using fallback segmentation...');
+  console.warn('⚠️ Using BALANCED fallback segmentation...');
 
   const sentences = scriptText
     .split(/[.!?]+/)
     .filter(s => s.trim().length > 0);
 
   const segments = [];
-  let buffer = '';
-  let wordCount = 0;
 
-  for (const sentence of sentences) {
-    const sentenceWords = sentence.trim().split(/\s+/).length;
+  for (let i = 0; i < sentences.length; i++) {
+    const sentence = sentences[i].trim();
+    const sentenceWords = sentence.split(/\s+/).length;
 
-    if (wordCount + sentenceWords > 30 && buffer) {
-      segments.push({ text: buffer.trim(), duration: 0 });
-      buffer = sentence.trim();
-      wordCount = sentenceWords;
+    if (sentenceWords > 25) {
+      // Only split very long sentences (25+ words) at comma
+      const commaParts = sentence.split(/,\s+(?=and|but|which|so|while)/);
+      if (commaParts.length > 1 && commaParts.every(part => part.split(/\s+/).length >= 8)) {
+        // Both parts are substantial, split them
+        commaParts.forEach(part => {
+          segments.push({
+            text: part.trim().endsWith(',') ? part.trim() : part.trim() + (commaParts.indexOf(part) < commaParts.length - 1 ? ',' : ''),
+            duration: 0
+          });
+        });
+      } else {
+        // Can't split properly, add as is
+        segments.push({ text: sentence, duration: 0 });
+      }
     } else {
-      buffer += (buffer ? '. ' : '') + sentence.trim();
-      wordCount += sentenceWords;
+      // Normal sentence (under 25 words), keep together
+      segments.push({ text: sentence, duration: 0 });
     }
   }
-
-  if (buffer) segments.push({ text: buffer.trim(), duration: 0 });
 
   return segments.map((seg, index) => {
     if (mediaType === 'images') {
@@ -358,12 +420,11 @@ function generateSegmentsFallback(scriptText, celebNames, mediaType, mixedAssign
 
 // ✅ Main entry point
 async function generateSegments(scriptText, mediaType = 'images') {
-  console.log(`🚀 Starting celebrity gossip segment generation with natural break points (media: ${mediaType})...`);
+  console.log(`🚀 Starting celebrity gossip segment generation with BALANCED pacing (media: ${mediaType})...`);
 
   const celebNames = extractCelebrityNames(scriptText);
 
   // Pre-assign mixed media types using Fisher-Yates
-  // We estimate segment count from word count before AI runs
   let mixedAssignments = null;
   if (mediaType === 'mixed') {
     const estimatedSegments = Math.max(
@@ -389,7 +450,7 @@ async function generateSegments(scriptText, mediaType = 'images') {
       console.warn(`⚠️ ${segments.length - validSegments.length} segment(s) had invalid data, dropped`);
     }
 
-    console.log(`✅ Generated ${validSegments.length} valid segments with natural pacing`);
+    console.log(`✅ Generated ${validSegments.length} valid segments with balanced pacing`);
     return validSegments;
 
   } catch (aiError) {
