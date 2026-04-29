@@ -66,7 +66,7 @@ function saveBufferToTemp(buffer, tempDir, filename) {
 // ============================================
 // 🎬 VIDEO SEGMENT PATH
 // Downloads celebrity video clip from R2
-// Trims to segment duration + transition padding
+// Trims to exact segment duration
 // Adds blurred background for aspect ratio mismatch
 // Loops seamlessly if clip is shorter than needed
 // ============================================
@@ -75,16 +75,12 @@ async function processVideoSegment(segment, format, tempDir, index) {
   const { width, height } = videoFormats[format];
   const outputPath = path.join(tempDir, `video_clip_${index}.mp4`);
 
-  // Include transition padding so xfade transitions work correctly
-  const transitionDuration = 0.5;
-  const hasTransitionAfter = segment.hasTransitionAfter !== false;
-  const clipDuration = hasTransitionAfter
-    ? segment.duration + transitionDuration
-    : segment.duration;
+  // ✅ Use exact audio duration (no padding)
+  const clipDuration = segment.duration;
 
   console.log(
     `🎬 Processing video segment ${index + 1} ` +
-    `(${segment.duration}s${hasTransitionAfter ? ' +0.5s transition padding' : ''})`
+    `(${segment.duration}s)`
   );
 
   try {
@@ -128,6 +124,7 @@ async function processVideoSegment(segment, format, tempDir, index) {
 
 // ============================================
 // 🖼️ IMAGE SEGMENT PATH: Sharp preprocessing
+// Smart scaling that preserves faces and important content
 // Handles orientation mismatch with blurred backgrounds
 // ============================================
 
@@ -142,17 +139,16 @@ async function preprocessImage(imageBuffer, format, tempDir, index) {
   try {
     if (format === 'longform') {
       if (isPortrait) {
-        // Portrait image in landscape video:
-        // blur as background, contain foreground centered
+        // Portrait image on landscape canvas - use blurred background
         const blurredBg = await img.clone()
-          .resize(width, height, { fit: 'cover' })
+          .resize(width, height, { fit: 'cover', position: 'center' })
           .blur(70)
           .jpeg()
           .toBuffer();
 
         const foreground = await img.clone()
           .resize(width, height, {
-            fit: 'contain',
+            fit: 'contain',  // Fit entire image, don't crop
             background: { r: 0, g: 0, b: 0, alpha: 0 }
           })
           .png()
@@ -163,21 +159,49 @@ async function preprocessImage(imageBuffer, format, tempDir, index) {
           .jpeg()
           .toFile(outputPath);
       } else {
-        // Landscape image in landscape video: simple cover crop
-        await img
-          .resize(width, height, { fit: 'cover' })
-          .jpeg()
-          .toFile(outputPath);
+        // ✅ Landscape - smart scaling to avoid cropping
+        const aspectRatio = metadata.width / metadata.height;
+        const targetAspect = width / height;
+
+        // If aspect ratios are very close, just resize with cover
+        if (Math.abs(aspectRatio - targetAspect) < 0.1) {
+          await img
+            .resize(width, height, { fit: 'cover', position: 'center' })
+            .jpeg()
+            .toFile(outputPath);
+        } else {
+          // Different aspect ratio - use blurred background to avoid cropping
+          const blurredBg = await img.clone()
+            .resize(width, height, { fit: 'cover', position: 'center' })
+            .blur(70)
+            .jpeg()
+            .toBuffer();
+
+          const foreground = await img.clone()
+            .resize(width, height, {
+              fit: 'contain',
+              background: { r: 0, g: 0, b: 0, alpha: 0 }
+            })
+            .png()
+            .toBuffer();
+
+          await sharp(blurredBg)
+            .composite([{ input: foreground, gravity: 'center' }])
+            .jpeg()
+            .toFile(outputPath);
+        }
       }
     } else if (format === 'shorts' || format === 'reels') {
-      // Portrait-first format
       const portraitHeight = 2200;
       const portraitWidth = 1350;
 
       if (isPortrait) {
-        // Portrait image in portrait video: ideal — cover crop
+        // Portrait image in portrait video: use contain to avoid cropping faces
         await img
-          .resize(portraitWidth, portraitHeight, { fit: 'cover' })
+          .resize(portraitWidth, portraitHeight, {
+            fit: 'contain',
+            background: { r: 0, g: 0, b: 0 }
+          })
           .jpeg()
           .toFile(outputPath);
       } else {
@@ -190,7 +214,7 @@ async function preprocessImage(imageBuffer, format, tempDir, index) {
           .toBuffer();
 
         const foreground = await img.clone()
-          .resize(width, height, {
+          .resize(portraitWidth, portraitHeight, {
             fit: 'contain',
             background: { r: 0, g: 0, b: 0, alpha: 0 }
           })
@@ -215,20 +239,18 @@ async function preprocessImage(imageBuffer, format, tempDir, index) {
 // ============================================
 // 🖼️ IMAGE SEGMENT PATH: Ken Burns motion clip
 // Takes preprocessed image → animated video clip
+// ✅ EXACT duration (no padding)
 // ============================================
 
 function generateMotionClip(imagePath, isPortrait, format, segment, index, tempDir) {
   const { width, height } = videoFormats[format];
   const outputPath = path.join(tempDir, `clip_${index}.mp4`);
   const fps = 25;
-  const transitionDuration = 0.5;
 
-  const hasTransitionAfter = segment.hasTransitionAfter !== false;
-  const duration = hasTransitionAfter
-    ? segment.duration + transitionDuration
-    : segment.duration;
-
+  // ✅ Use exact audio duration (no padding)
+  const duration = segment.duration;
   const totalFrames = Math.ceil(duration * fps);
+
   const targetZoom = format === 'longform' ? 1.2 : 1.35;
   const panAmount = format === 'longform' ? 0.05 : 0.08;
 
@@ -299,62 +321,25 @@ function generateMotionClip(imagePath, isPortrait, format, segment, index, tempD
 }
 
 // ============================================
-// 🔀 MERGE ALL CLIPS WITH XFADE TRANSITIONS
+// 🔀 MERGE ALL CLIPS (simple concat, no transitions)
 // Works identically for image clips and video clips
-// Both types are plain .mp4 at this point
 // ============================================
 
-function mergeVideoClips(clipPaths, segments, format, tempDir) {
+function mergeVideoClips(clipPaths, tempDir) {
   const mergedVideoPath = path.join(tempDir, 'merged.mp4');
-  const { width, height } = videoFormats[format];
-  const transitionDuration = 0.5;
-
-  const inputs = clipPaths.map(clip => `-i "${clip}"`).join(' ');
-  let filter = '';
-
-  // Normalize all clips to same resolution
-  segments.forEach((_, i) => {
-    filter += `[${i}:v]scale=${width}:${height},format=yuv420p[v${i}];`;
-  });
-
-  // Chain xfade transitions
-  let cumulativeAudioDuration = 0;
-
-  segments.forEach((seg, i) => {
-    if (i === 0) return;
-
-    cumulativeAudioDuration += segments[i - 1].duration;
-    const transitionOffset = cumulativeAudioDuration - transitionDuration;
-
-    const transitions = (format === 'shorts' || format === 'reels')
-      ? ['fade', 'slideright', 'smoothleft']
-      : ['fade', 'slideleft'];
-
-    const transitionType = transitions[(i - 1) % transitions.length];
-
-    let inputA, inputB;
-    if (i === 1) {
-      inputA = '[v0]';
-      inputB = '[v1]';
-    } else {
-      inputA = `[vt${i - 1}]`;
-      inputB = `[v${i}]`;
-    }
-
-    const outputLabel = i === segments.length - 1 ? '[vout]' : `[vt${i}]`;
-
-    filter +=
-      `${inputA}${inputB}xfade=transition=${transitionType}:` +
-      `duration=${transitionDuration}:` +
-      `offset=${transitionOffset.toFixed(2)}${outputLabel};`;
-  });
-
-  const cmd =
-    `ffmpeg -y ${inputs} -filter_complex "${filter}" ` +
-    `-map "[vout]" -c:v libx264 -preset fast -crf 18 "${mergedVideoPath}"`;
+  const concatFilePath = path.join(tempDir, 'concat.txt');
 
   try {
-    execSync(cmd, { stdio: 'pipe' });
+    const concatContent = clipPaths.map(clip => `file '${clip}'`).join('\n');
+    fs.writeFileSync(concatFilePath, concatContent);
+
+    console.log(`🔗 Merging ${clipPaths.length} clips...`);
+
+    const cmd = `ffmpeg -y -f concat -safe 0 -i "${concatFilePath}" -c:v libx264 -preset fast -crf 18 "${mergedVideoPath}"`;
+
+    execSync(cmd, { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+    fs.unlinkSync(concatFilePath);
+
     return mergedVideoPath;
   } catch (error) {
     console.error('❌ Failed to merge video clips:', error.message);
@@ -390,6 +375,7 @@ function addAudioToVideo(videoPath, audioPath, tempDir) {
 //   segment.videoUrl → processVideoSegment() → trim/scale/blur clip
 //   segment.imageUrl → preprocessImage() → generateMotionClip() → Ken Burns clip
 // Both clip types then go through the same merge + audio pipeline
+// ✅ NO TRANSITIONS, NO PADDING
 // ============================================
 
 async function renderVideo(jobId) {
@@ -425,11 +411,6 @@ async function renderVideo(jobId) {
       `total duration: ${audioDuration.toFixed(1)}s`
     );
 
-    // Add transition padding flags before processing
-    for (let i = 0; i < segments.length; i++) {
-  segments[i].hasTransitionAfter = (i < segments.length - 1);
-}
-
     // ============================================
     // STEP 1: Process each segment into a raw clip
     // Video segments → processVideoSegment (trim/scale/blur)
@@ -437,74 +418,73 @@ async function renderVideo(jobId) {
     // ============================================
     const processedMedia = [];
 
-for (let i = 0; i < segments.length; i++) {
-  const segment = segments[i];
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
 
-  if (segment.videoUrl) {
-    console.log(
-      `🎬 Processing video segment ${i + 1}/${segments.length} ` +
-      `[${segment.videoPlatform || 'celebrity video'}] ` +
-      `(${segment.duration}s)`
-    );
-    const processed = await processVideoSegment(segment, format, tempDir, i);
-    processedMedia.push(processed);
+      if (segment.videoUrl) {
+        console.log(
+          `🎬 Processing video segment ${i + 1}/${segments.length} ` +
+          `[${segment.videoPlatform || 'celebrity video'}] ` +
+          `(${segment.duration}s)`
+        );
+        const processed = await processVideoSegment(segment, format, tempDir, i);
+        processedMedia.push(processed);
 
-  } else if (segment.imageUrl) {
-    console.log(
-      `🖼️ Processing image segment ${i + 1}/${segments.length} ` +
-      `(${segment.duration}s)`
-    );
-    const imageBuffer = await downloadToBuffer(segment.imageUrl);
-    const processed = await preprocessImage(imageBuffer, format, tempDir, i);
-    processedMedia.push(processed);
+      } else if (segment.imageUrl) {
+        console.log(
+          `🖼️ Processing image segment ${i + 1}/${segments.length} ` +
+          `(${segment.duration}s)`
+        );
+        const imageBuffer = await downloadToBuffer(segment.imageUrl);
+        const processed = await preprocessImage(imageBuffer, format, tempDir, i);
+        processedMedia.push(processed);
 
-  } else {
-    throw new Error(
-      `Segment ${i + 1} has no imageUrl or videoUrl — ` +
-      `check the media fetching pipeline`
-    );
-  }
-}
+      } else {
+        throw new Error(
+          `Segment ${i + 1} has no imageUrl or videoUrl — ` +
+          `check the media fetching pipeline`
+        );
+      }
+    }
 
     // ============================================
     // STEP 2: Generate final clips
     // Video segments → already a clip (isVideo: true), use directly
     // Image segments → Ken Burns motion effect
+    // ✅ NO PADDING - exact duration
     // ============================================
-const clipPaths = [];
+    const clipPaths = [];
 
-for (let i = 0; i < segments.length; i++) {
-  if (processedMedia[i].isVideo) {
-    console.log(`✅ Using pre-processed video clip ${i + 1}/${segments.length}`);
-    clipPaths.push(processedMedia[i].path);
-  } else {
-    console.log(
-      `🎥 Generating Ken Burns clip ${i + 1}/${segments.length} ` +
-      `(${segments[i].duration}s` +
-      `${segments[i].hasTransitionAfter ? ' +0.5s padding' : ''})`
-    );
-    const clipPath = generateMotionClip(
-      processedMedia[i].path,
-      processedMedia[i].isPortrait,
-      format,
-      segments[i],
-      i,
-      tempDir
-    );
-    clipPaths.push(clipPath);
-  }
-}
+    for (let i = 0; i < segments.length; i++) {
+      if (processedMedia[i].isVideo) {
+        console.log(`✅ Using pre-processed video clip ${i + 1}/${segments.length}`);
+        clipPaths.push(processedMedia[i].path);
+      } else {
+        console.log(
+          `🎥 Generating Ken Burns clip ${i + 1}/${segments.length} ` +
+          `(${segments[i].duration}s exact)`
+        );
+        const clipPath = generateMotionClip(
+          processedMedia[i].path,
+          processedMedia[i].isPortrait,
+          format,
+          segments[i],
+          i,
+          tempDir
+        );
+        clipPaths.push(clipPath);
+      }
+    }
 
     // ============================================
-    // STEP 3: Merge all clips with xfade transitions
-    // Works the same regardless of clip source
+    // STEP 3: Merge all clips (simple concat, no transitions)
     // ============================================
     console.log(
       `🔄 Merging ${clipPaths.length} clips ` +
       `(${processedMedia.filter(m => m.isVideo).length} video, ` +
       `${processedMedia.filter(m => !m.isVideo).length} image)...`
     );
-    const mergedVideoPath = mergeVideoClips(clipPaths, segments, format, tempDir);
+    const mergedVideoPath = mergeVideoClips(clipPaths, tempDir);
 
     // ============================================
     // STEP 4: Add narration audio
