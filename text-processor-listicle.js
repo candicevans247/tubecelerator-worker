@@ -21,19 +21,99 @@ async function generateWithGemini(systemPrompt, userPrompt) {
   }
 }
 
-// ✅ OpenAI helper
-async function generateWithOpenAI(systemPrompt, userPrompt) {
+// ✅ OpenAI helper with HIGH token limit + AUTO-REPAIR truncated JSON
+async function generateWithOpenAI(systemPrompt, userPrompt, retryCount = 0) {
   console.warn('⚠️ Using OpenAI as fallback...');
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4',
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    temperature: 0.7,
-    max_tokens: 4000,
-  });
-  return response.choices[0].message.content.trim();
+  
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 4096, // High limit
+    });
+    
+    let result = response.choices[0].message.content.trim();
+    
+    // ✅ CRITICAL: Check if JSON was truncated
+    const cleaned = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    
+    // Check if it ends properly
+    if (!cleaned.endsWith(']') && !cleaned.endsWith('}')) {
+      console.warn(`⚠️ Detected truncated JSON (ends with: "${cleaned.slice(-50)}")`);
+      
+      // Try to repair by closing the JSON array
+      let repaired = cleaned;
+      
+      // If it's mid-object, close the object first
+      if (repaired.includes('{') && !repaired.endsWith('}')) {
+        // Count open vs closed braces
+        const openBraces = (repaired.match(/{/g) || []).length;
+        const closeBraces = (repaired.match(/}/g) || []).length;
+        const missingBraces = openBraces - closeBraces;
+        
+        if (missingBraces > 0) {
+          console.log(`🔧 Adding ${missingBraces} missing closing brace(s)`);
+          repaired += '}'.repeat(missingBraces);
+        }
+      }
+      
+      // Close the array if needed
+      if (repaired.includes('[') && !repaired.endsWith(']')) {
+        console.log('🔧 Adding missing closing bracket ]');
+        repaired += '\n]';
+      }
+      
+      // Test if the repair worked
+      try {
+        JSON.parse(repaired);
+        console.log('✅ Successfully repaired truncated JSON');
+        
+        // Return the repaired version (restore markdown if present)
+        if (result.startsWith('```json')) {
+          return '```json\n' + repaired + '\n```';
+        }
+        return repaired;
+        
+      } catch (parseError) {
+        console.error('❌ JSON repair failed:', parseError.message);
+        console.error('Repaired attempt:', repaired.slice(-200));
+        
+        // Retry once if first attempt
+        if (retryCount < 1) {
+          console.warn('🔄 Retrying OpenAI call (attempt 2)...');
+          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s
+          return generateWithOpenAI(systemPrompt, userPrompt, retryCount + 1);
+        }
+        
+        throw new Error('OpenAI response truncated and auto-repair failed');
+      }
+    }
+    
+    // Response is complete, return as-is
+    console.log('✅ OpenAI response complete (no truncation detected)');
+    return result;
+    
+  } catch (error) {
+    console.error('❌ OpenAI API error:', error.message);
+    
+    // If context length exceeded, try one more time with shorter prompt
+    if (retryCount < 1 && error.code === 'context_length_exceeded') {
+      console.warn('⚠️ Context length exceeded, retrying with abbreviated prompt...');
+      
+      // Shorten the user prompt by removing examples
+      const shortenedPrompt = userPrompt.split('SCRIPT:')[0] + 
+        'SCRIPT:\n' + 
+        userPrompt.split('SCRIPT:')[1];
+      
+      return generateWithOpenAI(systemPrompt, shortenedPrompt, retryCount + 1);
+    }
+    
+    throw error;
+  }
 }
 
 // ✅ Unified AI — Gemini first, OpenAI fallback
