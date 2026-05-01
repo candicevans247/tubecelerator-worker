@@ -31,6 +31,7 @@ async function generateWithOpenAI(systemPrompt, userPrompt) {
       { role: 'user', content: userPrompt }
     ],
     temperature: 0.7,
+    max_tokens: 4000,
   });
   return response.choices[0].message.content.trim();
 }
