@@ -165,7 +165,7 @@ function buildJsonFormat(mediaType) {
 ]`;
 }
 
-// ✅ UPDATED: Build content type block with BALANCED RULES
+// ✅ UPDATED: Build content type block with BALANCED RULES (matching working processor)
 function buildContentTypeBlock(listInfo) {
   const { celebNames, isCastBreakdown, isRankedList } = listInfo;
 
@@ -256,7 +256,7 @@ ${baseRules}
    - Create suspense through content, not awkward sentence breaks`;
 }
 
-// ✅ UPDATED: Main listicle segmentation with BALANCED RULES
+// ✅ UPDATED: Main listicle segmentation with BALANCED RULES (matching working processor)
 async function processListicleContent(scriptText, listInfo, mediaType, mixedAssignments) {
   const contentTypeBlock = buildContentTypeBlock(listInfo);
   const queryInstructions = buildQueryInstructions(mediaType, listInfo.celebNames);
@@ -395,7 +395,7 @@ ${scriptText}`;
   });
 }
 
-// ✅ UPDATED: Balanced fallback segmentation
+// ✅ UPDATED: Balanced fallback segmentation (matching working processor)
 function generateListicleFallback(scriptText, listInfo, mediaType, mixedAssignments) {
   console.warn('⚠️ Using BALANCED listicle fallback segmentation...');
 
