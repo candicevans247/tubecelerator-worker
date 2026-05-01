@@ -21,114 +21,18 @@ async function generateWithGemini(systemPrompt, userPrompt) {
   }
 }
 
-// ✅ OpenAI helper with STREAMING support (handles long responses)
-async function generateWithOpenAI(systemPrompt, userPrompt, retryCount = 0) {
+// ✅ OpenAI helper
+async function generateWithOpenAI(systemPrompt, userPrompt) {
   console.warn('⚠️ Using OpenAI as fallback...');
-  
-  try {
-    // ✅ Use streaming to avoid truncation
-    const stream = await openai.chat.completions.create({
-      model: 'gpt-4',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ],
-      temperature: 0.7,
-      max_tokens: 4096,
-      stream: true, // ✅ Enable streaming
-    });
-
-    let fullResponse = '';
-    let chunkCount = 0;
-    
-    // Collect all chunks
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content || '';
-      fullResponse += content;
-      chunkCount++;
-    }
-    
-    console.log(`✅ Received complete streaming response (${fullResponse.length} chars, ${chunkCount} chunks)`);
-    
-    // Validate the response is valid JSON
-    const cleaned = fullResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-    
-    try {
-      JSON.parse(cleaned);
-      console.log('✅ Streaming response is valid JSON');
-      return fullResponse.trim();
-    } catch (parseError) {
-      console.error('❌ Streaming response is invalid JSON:', parseError.message);
-      console.error('Response preview:', cleaned.slice(0, 200) + '...' + cleaned.slice(-200));
-      
-      // Last resort: try to repair
-      if (!cleaned.endsWith(']') && !cleaned.endsWith('}')) {
-        console.log('🔧 Attempting to repair incomplete JSON from stream...');
-        
-        let repaired = cleaned;
-        
-        // Close any open objects
-        const openBraces = (repaired.match(/{/g) || []).length;
-        const closeBraces = (repaired.match(/}/g) || []).length;
-        
-        if (openBraces > closeBraces) {
-          repaired += '}'.repeat(openBraces - closeBraces);
-        }
-        
-        // Close array
-        if (!repaired.endsWith(']')) {
-          repaired += '\n]';
-        }
-        
-        try {
-          JSON.parse(repaired);
-          console.log('✅ Repaired streaming JSON');
-          return repaired;
-        } catch (repairError) {
-          console.error('❌ Could not repair streaming JSON');
-        }
-      }
-      
-      // Retry once if this is first attempt
-      if (retryCount < 1) {
-        console.warn('🔄 Retrying OpenAI streaming call...');
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        return generateWithOpenAI(systemPrompt, userPrompt, retryCount + 1);
-      }
-      
-      throw new Error('OpenAI streaming response invalid and repair failed');
-    }
-    
-  } catch (streamError) {
-    console.error('❌ OpenAI streaming error:', streamError.message);
-    
-    // If streaming fails entirely, try non-streaming as last resort
-    if (retryCount < 1) {
-      console.warn('🔄 Streaming failed, trying non-streaming fallback...');
-      
-      try {
-        const response = await openai.chat.completions.create({
-          model: 'gpt-4',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
-          temperature: 0.7,
-          max_tokens: 4096,
-          stream: false,
-        });
-        
-        const result = response.choices[0].message.content.trim();
-        console.log('✅ Non-streaming fallback successful');
-        return result;
-        
-      } catch (nonStreamError) {
-        console.error('❌ Non-streaming fallback also failed:', nonStreamError.message);
-      }
-    }
-    
-    throw streamError;
-  }
+  const response = await openai.chat.completions.create({
+    model: 'gpt-4',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    temperature: 0.7,
+  });
+  return response.choices[0].message.content.trim();
 }
 
 // ✅ Unified AI — Gemini first, OpenAI fallback
