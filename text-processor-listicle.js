@@ -21,98 +21,113 @@ async function generateWithGemini(systemPrompt, userPrompt) {
   }
 }
 
-// ✅ OpenAI helper with HIGH token limit + AUTO-REPAIR truncated JSON
+// ✅ OpenAI helper with STREAMING support (handles long responses)
 async function generateWithOpenAI(systemPrompt, userPrompt, retryCount = 0) {
   console.warn('⚠️ Using OpenAI as fallback...');
   
   try {
-    const response = await openai.chat.completions.create({
+    // ✅ Use streaming to avoid truncation
+    const stream = await openai.chat.completions.create({
       model: 'gpt-4',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ],
       temperature: 0.7,
-      max_tokens: 4096, // High limit
+      max_tokens: 4096,
+      stream: true, // ✅ Enable streaming
     });
+
+    let fullResponse = '';
+    let chunkCount = 0;
     
-    let result = response.choices[0].message.content.trim();
+    // Collect all chunks
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || '';
+      fullResponse += content;
+      chunkCount++;
+    }
     
-    // ✅ CRITICAL: Check if JSON was truncated
-    const cleaned = result.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    console.log(`✅ Received complete streaming response (${fullResponse.length} chars, ${chunkCount} chunks)`);
     
-    // Check if it ends properly
-    if (!cleaned.endsWith(']') && !cleaned.endsWith('}')) {
-      console.warn(`⚠️ Detected truncated JSON (ends with: "${cleaned.slice(-50)}")`);
+    // Validate the response is valid JSON
+    const cleaned = fullResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    
+    try {
+      JSON.parse(cleaned);
+      console.log('✅ Streaming response is valid JSON');
+      return fullResponse.trim();
+    } catch (parseError) {
+      console.error('❌ Streaming response is invalid JSON:', parseError.message);
+      console.error('Response preview:', cleaned.slice(0, 200) + '...' + cleaned.slice(-200));
       
-      // Try to repair by closing the JSON array
-      let repaired = cleaned;
-      
-      // If it's mid-object, close the object first
-      if (repaired.includes('{') && !repaired.endsWith('}')) {
-        // Count open vs closed braces
+      // Last resort: try to repair
+      if (!cleaned.endsWith(']') && !cleaned.endsWith('}')) {
+        console.log('🔧 Attempting to repair incomplete JSON from stream...');
+        
+        let repaired = cleaned;
+        
+        // Close any open objects
         const openBraces = (repaired.match(/{/g) || []).length;
         const closeBraces = (repaired.match(/}/g) || []).length;
-        const missingBraces = openBraces - closeBraces;
         
-        if (missingBraces > 0) {
-          console.log(`🔧 Adding ${missingBraces} missing closing brace(s)`);
-          repaired += '}'.repeat(missingBraces);
+        if (openBraces > closeBraces) {
+          repaired += '}'.repeat(openBraces - closeBraces);
+        }
+        
+        // Close array
+        if (!repaired.endsWith(']')) {
+          repaired += '\n]';
+        }
+        
+        try {
+          JSON.parse(repaired);
+          console.log('✅ Repaired streaming JSON');
+          return repaired;
+        } catch (repairError) {
+          console.error('❌ Could not repair streaming JSON');
         }
       }
       
-      // Close the array if needed
-      if (repaired.includes('[') && !repaired.endsWith(']')) {
-        console.log('🔧 Adding missing closing bracket ]');
-        repaired += '\n]';
+      // Retry once if this is first attempt
+      if (retryCount < 1) {
+        console.warn('🔄 Retrying OpenAI streaming call...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        return generateWithOpenAI(systemPrompt, userPrompt, retryCount + 1);
       }
       
-      // Test if the repair worked
+      throw new Error('OpenAI streaming response invalid and repair failed');
+    }
+    
+  } catch (streamError) {
+    console.error('❌ OpenAI streaming error:', streamError.message);
+    
+    // If streaming fails entirely, try non-streaming as last resort
+    if (retryCount < 1) {
+      console.warn('🔄 Streaming failed, trying non-streaming fallback...');
+      
       try {
-        JSON.parse(repaired);
-        console.log('✅ Successfully repaired truncated JSON');
+        const response = await openai.chat.completions.create({
+          model: 'gpt-4',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userPrompt }
+          ],
+          temperature: 0.7,
+          max_tokens: 4096,
+          stream: false,
+        });
         
-        // Return the repaired version (restore markdown if present)
-        if (result.startsWith('```json')) {
-          return '```json\n' + repaired + '\n```';
-        }
-        return repaired;
+        const result = response.choices[0].message.content.trim();
+        console.log('✅ Non-streaming fallback successful');
+        return result;
         
-      } catch (parseError) {
-        console.error('❌ JSON repair failed:', parseError.message);
-        console.error('Repaired attempt:', repaired.slice(-200));
-        
-        // Retry once if first attempt
-        if (retryCount < 1) {
-          console.warn('🔄 Retrying OpenAI call (attempt 2)...');
-          await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2s
-          return generateWithOpenAI(systemPrompt, userPrompt, retryCount + 1);
-        }
-        
-        throw new Error('OpenAI response truncated and auto-repair failed');
+      } catch (nonStreamError) {
+        console.error('❌ Non-streaming fallback also failed:', nonStreamError.message);
       }
     }
     
-    // Response is complete, return as-is
-    console.log('✅ OpenAI response complete (no truncation detected)');
-    return result;
-    
-  } catch (error) {
-    console.error('❌ OpenAI API error:', error.message);
-    
-    // If context length exceeded, try one more time with shorter prompt
-    if (retryCount < 1 && error.code === 'context_length_exceeded') {
-      console.warn('⚠️ Context length exceeded, retrying with abbreviated prompt...');
-      
-      // Shorten the user prompt by removing examples
-      const shortenedPrompt = userPrompt.split('SCRIPT:')[0] + 
-        'SCRIPT:\n' + 
-        userPrompt.split('SCRIPT:')[1];
-      
-      return generateWithOpenAI(systemPrompt, shortenedPrompt, retryCount + 1);
-    }
-    
-    throw error;
+    throw streamError;
   }
 }
 
