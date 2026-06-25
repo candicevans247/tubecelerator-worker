@@ -12,21 +12,99 @@ const pool = require('./db');
 const { uploadFile } = require('./storage');
 require('dotenv').config();
 
-// yt-dlp binary path
-const YT_DLP_PATH = path.join(__dirname, 'yt-dlp');
+// ── Use the standalone binary name to be explicit ──────────────────
+// yt-dlp_linux = self-contained, bundles Python 3.10+ internally
+// yt-dlp       = Python zipapp, requires system Python 3.10+ (broken on Railway)
+const YT_DLP_PATH = path.join(__dirname, 'yt-dlp_linux');
 
 // ============================================
 // 🔧 YT-DLP SETUP
 // ============================================
 
 async function ensureYtDlp() {
-  if (!fs.existsSync(YT_DLP_PATH)) {
-    console.log('📦 Downloading yt-dlp binary...');
+  if (fs.existsSync(YT_DLP_PATH)) {
+    // Validate existing binary still works
+    try {
+      execSync(`${YT_DLP_PATH} --version`, { stdio: 'pipe', timeout: 10000 });
+      return; // Binary is healthy
+    } catch (e) {
+      console.warn('⚠️ yt-dlp binary validation failed, re-downloading...');
+      try { fs.unlinkSync(YT_DLP_PATH); } catch (_) {}
+    }
+  }
+
+  console.log('📦 Downloading yt-dlp standalone binary...');
+  console.log('   (yt-dlp_linux — bundles its own Python, no system Python needed)');
+
+  execSync(
+    `curl -L ` +
+    `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux ` +
+    `-o "${YT_DLP_PATH}"`,
+    { 
+      stdio: 'inherit',  // show download progress
+      timeout: 120000    // 2 min timeout for slow connections
+    }
+  );
+
+  execSync(`chmod +x "${YT_DLP_PATH}"`);
+
+  // Confirm it works before returning
+  const version = execSync(`"${YT_DLP_PATH}" --version`, { 
+    encoding: 'utf-8', 
+    stdio: 'pipe',
+    timeout: 10000 
+  }).trim();
+
+  console.log(`✅ yt-dlp standalone binary ready — version: ${version}`);
+}
+
+// ============================================
+// 📥 YT-DLP DOWNLOAD  (rest stays the same,
+//    just make sure YT_DLP_PATH is used everywhere)
+// ============================================
+
+async function downloadVideoWithYtDlp(url, tempDir) {
+  await ensureYtDlp();
+
+  const outputTemplate = path.join(tempDir, '%(id)s.%(ext)s');
+
+  console.log(`⬇️ Downloading via yt-dlp: ${url}`);
+
+  try {
     execSync(
-      `curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o ${YT_DLP_PATH}`
+      `"${YT_DLP_PATH}" -f "best[ext=mp4]/best" --no-playlist ` +
+      `-o "${outputTemplate}" "${url}"`,
+      { 
+        stdio: 'pipe', 
+        timeout: 120000 
+      }
     );
-    execSync(`chmod +x ${YT_DLP_PATH}`);
-    console.log('✅ yt-dlp ready');
+
+    // Find the downloaded file (extension may vary)
+    const files = fs.readdirSync(tempDir);
+    if (files.length === 0) {
+      throw new Error('yt-dlp completed but no file was written to temp dir');
+    }
+
+    // Pick the largest file if multiple exist (yt-dlp sometimes writes temp files)
+    const downloadedFile = files
+      .map(f => ({ 
+        name: f, 
+        size: fs.statSync(path.join(tempDir, f)).size 
+      }))
+      .sort((a, b) => b.size - a.size)[0].name;
+
+    const downloadedPath = path.join(tempDir, downloadedFile);
+
+    console.log(`✅ Downloaded: ${downloadedFile} (${(fs.statSync(downloadedPath).size / 1024 / 1024).toFixed(2)}MB)`);
+    return downloadedPath;
+
+  } catch (error) {
+    // Log the actual yt-dlp stderr for easier debugging
+    const stderr = error.stderr?.toString() || error.message;
+    console.error(`❌ yt-dlp download failed for ${url}:`);
+    console.error(stderr.split('\n').slice(0, 5).join('\n')); // first 5 lines only
+    throw new Error(`yt-dlp failed: ${stderr.split('\n')[0]}`);
   }
 }
 
